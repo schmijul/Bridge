@@ -2,6 +2,10 @@
 
 Bridge is a fast, privacy-first team messaging platform with real-time sync and a clean UX.
 
+## Screenshot
+
+![Bridge UI](imgs/Screenshot%20from%202026-03-22%2016-34-34.png)
+
 ## Stack
 
 - TypeScript monorepo (`npm` workspaces)
