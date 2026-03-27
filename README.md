@@ -58,6 +58,7 @@ Admin endpoints are protected by role and expect `x-user-id` in request headers.
 - `PATCH /admin/channels/:channelId`
 - `POST /admin/users`
 - `PATCH /admin/users/:userId/role`
+- `PATCH /admin/users/:userId/status`
 - `PATCH /admin/settings`
 - `DELETE /admin/messages/:messageId`
 

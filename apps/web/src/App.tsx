@@ -354,6 +354,18 @@ export function App() {
     }
   }
 
+  async function toggleUserStatus(userId: string, isActive: boolean) {
+    try {
+      await adminRequest(`/admin/users/${userId}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({ isActive })
+      });
+      setNotice(`User ${isActive ? "aktiviert" : "deaktiviert"}.`);
+    } catch (error) {
+      setNotice((error as Error).message);
+    }
+  }
+
   async function saveWorkspaceSettings() {
     try {
       await adminRequest("/admin/settings", {
@@ -641,19 +653,30 @@ export function App() {
                         <div>
                           <strong>{user.displayName}</strong>
                           <p>{user.email}</p>
+                          <span className={`pill ${user.isActive ? "ok" : "muted"}`}>
+                            {user.isActive ? "active" : "inactive"}
+                          </span>
                         </div>
-                        <select
-                          value={user.role}
-                          onChange={(event) =>
-                            changeRole(user.id, event.target.value as UserRole)
-                          }
-                        >
-                          {roleOrder.map((role) => (
-                            <option key={role} value={role}>
-                              {role}
-                            </option>
-                          ))}
-                        </select>
+                        <div className="rowActions">
+                          <select
+                            value={user.role}
+                            onChange={(event) =>
+                              changeRole(user.id, event.target.value as UserRole)
+                            }
+                          >
+                            {roleOrder.map((role) => (
+                              <option key={role} value={role}>
+                                {role}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            onClick={() => toggleUserStatus(user.id, !user.isActive)}
+                            className={user.isActive ? "warnBtn" : "successBtn"}
+                          >
+                            {user.isActive ? "Deactivate" : "Activate"}
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
