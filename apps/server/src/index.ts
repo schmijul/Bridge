@@ -23,6 +23,37 @@ const envSchema = z.object({
   CORS_ORIGIN: z.string().default("http://localhost:5173")
 });
 
+const clientEventSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("message:send"),
+    payload: z.object({
+      channelId: z.string().min(1),
+      content: z.string().min(1).max(4000),
+      tempId: z.string().min(1)
+    })
+  }),
+  z.object({
+    type: z.literal("presence:update"),
+    payload: z.object({
+      state: z.enum(["online", "away", "offline"])
+    })
+  }),
+  z.object({
+    type: z.literal("typing:update"),
+    payload: z.object({
+      channelId: z.string().min(1),
+      isTyping: z.boolean()
+    })
+  }),
+  z.object({
+    type: z.literal("read:update"),
+    payload: z.object({
+      channelId: z.string().min(1),
+      lastMessageId: z.string().min(1)
+    })
+  })
+]);
+
 const env = envSchema.parse(process.env);
 
 const app = Fastify({ logger: { level: "info" } });
@@ -97,12 +128,43 @@ wss.on("connection", (socket) => {
 
   socket.on("message", (buffer) => {
     try {
-      const event = JSON.parse(buffer.toString("utf8")) as ClientEvent;
+      const candidate = JSON.parse(buffer.toString("utf8")) as unknown;
+      const parsed = clientEventSchema.safeParse(candidate);
+      if (!parsed.success) {
+        socket.send(
+          JSON.stringify({
+            type: "error",
+            payload: { message: "invalid event payload" }
+          } satisfies ServerEvent)
+        );
+        return;
+      }
+      const event: ClientEvent = parsed.data;
       if (event.type === "message:send") {
+        const content = event.payload.content.trim();
+        if (!content) {
+          socket.send(
+            JSON.stringify({
+              type: "error",
+              payload: { message: "message content cannot be empty" }
+            } satisfies ServerEvent)
+          );
+          return;
+        }
+        const channelExists = channels.some((channel) => channel.id === event.payload.channelId);
+        if (!channelExists) {
+          socket.send(
+            JSON.stringify({
+              type: "error",
+              payload: { message: "channel not found" }
+            } satisfies ServerEvent)
+          );
+          return;
+        }
         const serverEvent = addMessage(
           event.payload.channelId,
           "u-1",
-          event.payload.content.trim()
+          content
         );
         broadcast(serverEvent);
       }
@@ -112,10 +174,44 @@ wss.on("connection", (socket) => {
       }
 
       if (event.type === "typing:update") {
+        const channelExists = channels.some((channel) => channel.id === event.payload.channelId);
+        if (!channelExists) {
+          socket.send(
+            JSON.stringify({
+              type: "error",
+              payload: { message: "channel not found" }
+            } satisfies ServerEvent)
+          );
+          return;
+        }
         broadcast(typingChanged("u-1", event.payload.channelId, event.payload.isTyping));
       }
 
       if (event.type === "read:update") {
+        const channelExists = channels.some((channel) => channel.id === event.payload.channelId);
+        if (!channelExists) {
+          socket.send(
+            JSON.stringify({
+              type: "error",
+              payload: { message: "channel not found" }
+            } satisfies ServerEvent)
+          );
+          return;
+        }
+        const messageExists = messages.some(
+          (message) =>
+            message.id === event.payload.lastMessageId &&
+            message.channelId === event.payload.channelId
+        );
+        if (!messageExists) {
+          socket.send(
+            JSON.stringify({
+              type: "error",
+              payload: { message: "message not found in channel" }
+            } satisfies ServerEvent)
+          );
+          return;
+        }
         broadcast(
           setReadState("u-1", event.payload.channelId, event.payload.lastMessageId)
         );

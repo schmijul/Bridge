@@ -14,10 +14,11 @@ echo "[smoke] build"
 npm run build
 
 echo "[smoke] start server"
+LOG_FILE="/tmp/bridge-smoke-server.log"
 (
   cd apps/server
   PORT=4010 CORS_ORIGIN=http://localhost:5173 npm run start
-) > /tmp/bridge-smoke-server.log 2>&1 &
+) > "$LOG_FILE" 2>&1 &
 SERVER_PID=$!
 
 cleanup() {
@@ -28,12 +29,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
+server_ready="false"
 for _ in $(seq 1 25); do
-  if curl -fsS "http://localhost:4010/health" >/dev/null; then
+  if curl -fsS "http://localhost:4010/health" >/dev/null 2>&1; then
+    server_ready="true"
     break
   fi
   sleep 1
 done
+
+if [ "$server_ready" != "true" ]; then
+  echo "[smoke] server failed to become ready on :4010"
+  echo "[smoke] server log:"
+  sed -n '1,200p' "$LOG_FILE"
+  exit 1
+fi
 
 HEALTH_JSON="$(curl -fsS "http://localhost:4010/health")"
 BOOTSTRAP_JSON="$(curl -fsS "http://localhost:4010/bootstrap")"

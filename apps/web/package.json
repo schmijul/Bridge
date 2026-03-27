@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -p tsconfig.json && vite build && ../../scripts/build-meta.sh dist/build-meta.json",
+    "build": "tsc -p tsconfig.json --noEmit && vite build && ../../scripts/build-meta.sh dist/build-meta.json",
     "preview": "vite preview",
     "test": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit"

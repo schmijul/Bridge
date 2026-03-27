@@ -3,6 +3,7 @@ node_modules
 .env.*
 !.env.example
 dist
+dist-types
 coverage
 .DS_Store
 npm-debug.log*
