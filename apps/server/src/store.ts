@@ -85,14 +85,14 @@ function makeInitialMessages(now: string): Message[] {
       id: "m-1",
       channelId: "c-general",
       senderId: "u-1",
-      content: "Willkommen bei Bridge. Bitte nutzt Threads fuer Entscheidungen.",
+      content: "Welcome to Bridge. Please use threads for decisions.",
       createdAt: now
     },
     {
       id: "m-2",
       channelId: "c-product",
       senderId: "u-2",
-      content: "Release-Freeze am Freitag 14:00 Uhr.",
+      content: "Release freeze on Friday at 14:00.",
       createdAt: now
     }
   ];

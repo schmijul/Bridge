@@ -292,7 +292,7 @@ export function App() {
 
   async function createNewChannel() {
     if (!newChannelName || !newChannelDesc) {
-      setNotice("Bitte Channel-Name und Beschreibung angeben.");
+      setNotice("Please provide a channel name and description.");
       return;
     }
 
@@ -308,7 +308,7 @@ export function App() {
       setNewChannelName("");
       setNewChannelDesc("");
       setNewChannelPrivate(false);
-      setNotice("Channel wurde angelegt.");
+      setNotice("Channel created.");
     } catch (error) {
       setNotice((error as Error).message);
     }
@@ -320,7 +320,7 @@ export function App() {
         method: "PATCH",
         body: JSON.stringify({ archived: true })
       });
-      setNotice("Channel wurde archiviert.");
+      setNotice("Channel archived.");
     } catch (error) {
       setNotice((error as Error).message);
     }
@@ -328,7 +328,7 @@ export function App() {
 
   async function inviteNewUser() {
     if (!inviteName || !inviteEmail) {
-      setNotice("Bitte Name und E-Mail fuer Einladung angeben.");
+      setNotice("Please provide a name and email for the invite.");
       return;
     }
 
@@ -344,7 +344,7 @@ export function App() {
       setInviteName("");
       setInviteEmail("");
       setInviteRole("member");
-      setNotice("User wurde eingeladen.");
+      setNotice("User invited.");
     } catch (error) {
       setNotice((error as Error).message);
     }
@@ -356,7 +356,7 @@ export function App() {
         method: "PATCH",
         body: JSON.stringify({ role })
       });
-      setNotice("Rolle aktualisiert.");
+      setNotice("Role updated.");
     } catch (error) {
       setNotice((error as Error).message);
     }
@@ -368,7 +368,7 @@ export function App() {
         method: "PATCH",
         body: JSON.stringify({ isActive })
       });
-      setNotice(`User ${isActive ? "aktiviert" : "deaktiviert"}.`);
+      setNotice(`User ${isActive ? "activated" : "deactivated"}.`);
     } catch (error) {
       setNotice((error as Error).message);
     }
@@ -385,7 +385,7 @@ export function App() {
           enforceMfaForAdmins: enforceMfa
         })
       });
-      setNotice("Workspace-Settings gespeichert.");
+      setNotice("Workspace settings saved.");
     } catch (error) {
       setNotice((error as Error).message);
     }
@@ -396,7 +396,7 @@ export function App() {
       await adminRequest(`/admin/messages/${messageId}`, {
         method: "DELETE"
       });
-      setNotice("Nachricht geloescht.");
+      setNotice("Message deleted.");
     } catch (error) {
       setNotice((error as Error).message);
     }
@@ -542,7 +542,7 @@ export function App() {
 
           {!isAdmin ? (
             <div className="card warnCard">
-              Dein aktueller User hat keine Admin-/Manager-Rechte.
+              Your current user does not have admin or manager permissions.
             </div>
           ) : (
             <>
