@@ -43,6 +43,8 @@ const wsUrl = import.meta.env.VITE_WS_URL ?? "ws://localhost:4000";
 const roleOrder: UserRole[] = ["admin", "manager", "member", "guest"];
 
 export function App() {
+  const initialTab: Tab =
+    new URLSearchParams(window.location.search).get("tab") === "admin" ? "admin" : "chat";
   const [messages, setMessages] = useState<Message[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -54,7 +56,7 @@ export function App() {
   const [notice, setNotice] = useState<string>("");
   const [draft, setDraft] = useState("");
   const [activeChannelId, setActiveChannelId] = useState("c-general");
-  const [activeTab, setActiveTab] = useState<Tab>("chat");
+  const [activeTab, setActiveTab] = useState<Tab>(initialTab);
   const [currentUserId, setCurrentUserId] = useState("u-1");
 
   const [newChannelName, setNewChannelName] = useState("");
@@ -263,6 +265,12 @@ export function App() {
       // no-op for non-admin users
     });
   }, [currentUserId]);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", activeTab);
+    window.history.replaceState({}, "", url.toString());
+  }, [activeTab]);
 
   async function adminRequest(path: string, init?: RequestInit): Promise<Response> {
     const response = await fetch(`${apiBase}${path}`, {

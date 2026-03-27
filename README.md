@@ -2,9 +2,15 @@
 
 Bridge is a privacy-first team messaging platform with real-time sync, workspace governance controls, and an integrated admin board.
 
-## Screenshot
+## Screenshots
 
-![Bridge UI](imgs/Screenshot%20from%202026-03-22%2016-34-34.png)
+### Chat Workspace
+
+![Bridge Chat Workspace](imgs/chat-overview.png)
+
+### Admin Board
+
+![Bridge Admin Board](imgs/admin-board.png)
 
 ## Stack
 
