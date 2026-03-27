@@ -1,23 +1,80 @@
 import { randomUUID } from "node:crypto";
 import type {
+  AuditLogEntry,
   Channel,
   Message,
   PresenceState,
   ReadState,
   ServerEvent,
-  User
+  User,
+  UserRole,
+  Workspace,
+  WorkspaceSettings
 } from "@bridge/shared";
 
 const workspaceId = "workspace-1";
 
+export const workspace: Workspace = {
+  id: workspaceId,
+  settings: {
+    workspaceName: "Bridge Product Team",
+    messageRetentionDays: 365,
+    allowGuestAccess: false,
+    enforceMfaForAdmins: true
+  }
+};
+
+const now = new Date().toISOString();
+
 export const users: User[] = [
-  { id: "u-1", displayName: "Alex", email: "alex@bridge.local" },
-  { id: "u-2", displayName: "Sam", email: "sam@bridge.local" }
+  {
+    id: "u-1",
+    displayName: "Alex",
+    email: "alex@bridge.local",
+    role: "admin",
+    isActive: true,
+    lastSeenAt: now
+  },
+  {
+    id: "u-2",
+    displayName: "Sam",
+    email: "sam@bridge.local",
+    role: "manager",
+    isActive: true,
+    lastSeenAt: now
+  },
+  {
+    id: "u-3",
+    displayName: "Nina",
+    email: "nina@bridge.local",
+    role: "member",
+    isActive: true,
+    lastSeenAt: now
+  }
 ];
 
 export const channels: Channel[] = [
-  { id: "c-general", workspaceId, name: "general", isPrivate: false },
-  { id: "c-product", workspaceId, name: "product", isPrivate: false }
+  {
+    id: "c-general",
+    workspaceId,
+    name: "general",
+    isPrivate: false,
+    description: "Announcements and cross-team updates"
+  },
+  {
+    id: "c-product",
+    workspaceId,
+    name: "product",
+    isPrivate: false,
+    description: "Roadmap, planning and feature delivery"
+  },
+  {
+    id: "c-support",
+    workspaceId,
+    name: "support",
+    isPrivate: false,
+    description: "Customer issues and escalation workflow"
+  }
 ];
 
 export const messages: Message[] = [
@@ -25,12 +82,31 @@ export const messages: Message[] = [
     id: "m-1",
     channelId: "c-general",
     senderId: "u-1",
-    content: "Welcome to Bridge.",
-    createdAt: new Date().toISOString()
+    content: "Willkommen bei Bridge. Bitte nutzt Threads fuer Entscheidungen.",
+    createdAt: now
+  },
+  {
+    id: "m-2",
+    channelId: "c-product",
+    senderId: "u-2",
+    content: "Release-Freeze am Freitag 14:00 Uhr.",
+    createdAt: now
   }
 ];
 
-const presence = new Map<string, PresenceState>();
+export const auditLog: AuditLogEntry[] = [
+  {
+    id: randomUUID(),
+    action: "workspace.initialized",
+    actorId: "u-1",
+    targetType: "workspace",
+    targetId: workspaceId,
+    summary: "Workspace initialized with baseline defaults",
+    createdAt: now
+  }
+];
+
+const presence = new Map<string, PresenceState>([["u-1", "online"]]);
 const readState = new Map<string, ReadState>();
 let sequence = 0;
 
@@ -43,8 +119,16 @@ export function currentSequence(): number {
   return sequence;
 }
 
+export function getUserById(userId: string): User | undefined {
+  return users.find((user) => user.id === userId);
+}
+
 export function setPresence(userId: string, state: PresenceState): ServerEvent {
   presence.set(userId, state);
+  const user = getUserById(userId);
+  if (user) {
+    user.lastSeenAt = new Date().toISOString();
+  }
   return {
     type: "presence:changed",
     payload: { userId, state, sequence: nextSequence() }
@@ -76,6 +160,18 @@ export function addMessage(
   };
 }
 
+export function deleteMessage(messageId: string): ServerEvent | null {
+  const index = messages.findIndex((message) => message.id === messageId);
+  if (index === -1) {
+    return null;
+  }
+  messages.splice(index, 1);
+  return {
+    type: "message:deleted",
+    payload: { messageId, sequence: nextSequence() }
+  };
+}
+
 export function setReadState(
   userId: string,
   channelId: string,
@@ -96,5 +192,126 @@ export function typingChanged(
   return {
     type: "typing:changed",
     payload: { userId, channelId, isTyping, sequence: nextSequence() }
+  };
+}
+
+export function createChannel(input: {
+  name: string;
+  description: string;
+  isPrivate: boolean;
+}): ServerEvent {
+  const channel: Channel = {
+    id: `c-${randomUUID()}`,
+    workspaceId,
+    name: input.name,
+    description: input.description,
+    isPrivate: input.isPrivate
+  };
+  channels.push(channel);
+  return {
+    type: "channel:created",
+    payload: { ...channel, sequence: nextSequence() }
+  };
+}
+
+export function archiveChannel(channelId: string): ServerEvent | null {
+  const channel = channels.find((item) => item.id === channelId);
+  if (!channel) {
+    return null;
+  }
+  channel.archivedAt = new Date().toISOString();
+  return {
+    type: "channel:updated",
+    payload: { ...channel, sequence: nextSequence() }
+  };
+}
+
+export function inviteUser(input: {
+  displayName: string;
+  email: string;
+  role: UserRole;
+}): ServerEvent {
+  const user: User = {
+    id: `u-${randomUUID()}`,
+    displayName: input.displayName,
+    email: input.email,
+    role: input.role,
+    isActive: true,
+    lastSeenAt: new Date().toISOString()
+  };
+  users.push(user);
+  return {
+    type: "user:updated",
+    payload: { ...user, sequence: nextSequence() }
+  };
+}
+
+export function updateUserRole(userId: string, role: UserRole): ServerEvent | null {
+  const user = users.find((item) => item.id === userId);
+  if (!user) {
+    return null;
+  }
+  user.role = role;
+  return {
+    type: "user:updated",
+    payload: { ...user, sequence: nextSequence() }
+  };
+}
+
+export function updateWorkspaceSettings(
+  patch: Partial<WorkspaceSettings>
+): ServerEvent {
+  workspace.settings = {
+    ...workspace.settings,
+    ...patch
+  };
+  return {
+    type: "workspace:updated",
+    payload: { ...workspace, sequence: nextSequence() }
+  };
+}
+
+export function appendAuditLog(input: {
+  action: string;
+  actorId: string;
+  targetType: AuditLogEntry["targetType"];
+  targetId: string;
+  summary: string;
+}): ServerEvent {
+  const entry: AuditLogEntry = {
+    id: randomUUID(),
+    action: input.action,
+    actorId: input.actorId,
+    targetType: input.targetType,
+    targetId: input.targetId,
+    summary: input.summary,
+    createdAt: new Date().toISOString()
+  };
+  auditLog.unshift(entry);
+  if (auditLog.length > 200) {
+    auditLog.length = 200;
+  }
+  return {
+    type: "audit:new",
+    payload: { ...entry, sequence: nextSequence() }
+  };
+}
+
+export function getAdminOverview() {
+  return {
+    workspace,
+    users,
+    channels,
+    messages,
+    auditLog,
+    stats: {
+      totalUsers: users.length,
+      activeUsers: users.filter((user) => user.isActive).length,
+      onlineUsers: getOnlineUserIds().length,
+      totalChannels: channels.filter((channel) => !channel.archivedAt).length,
+      privateChannels: channels.filter((channel) => channel.isPrivate && !channel.archivedAt)
+        .length,
+      totalMessages: messages.length
+    }
   };
 }

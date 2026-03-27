@@ -1,9 +1,13 @@
 export type PresenceState = "online" | "away" | "offline";
+export type UserRole = "admin" | "manager" | "member" | "guest";
 
 export interface User {
   id: string;
   displayName: string;
   email: string;
+  role: UserRole;
+  isActive: boolean;
+  lastSeenAt: string;
 }
 
 export interface Channel {
@@ -11,6 +15,8 @@ export interface Channel {
   workspaceId: string;
   name: string;
   isPrivate: boolean;
+  description: string;
+  archivedAt?: string;
 }
 
 export interface Message {
@@ -29,6 +35,28 @@ export interface ReadState {
 
 export interface SyncCursor {
   sequence: number;
+}
+
+export interface WorkspaceSettings {
+  workspaceName: string;
+  messageRetentionDays: number;
+  allowGuestAccess: boolean;
+  enforceMfaForAdmins: boolean;
+}
+
+export interface Workspace {
+  id: string;
+  settings: WorkspaceSettings;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  action: string;
+  actorId: string;
+  targetType: "channel" | "user" | "message" | "workspace";
+  targetId: string;
+  summary: string;
+  createdAt: string;
 }
 
 export type ClientEvent =
@@ -55,6 +83,30 @@ export type ServerEvent =
       payload: Message & { sequence: number };
     }
   | {
+      type: "message:deleted";
+      payload: { messageId: string; sequence: number };
+    }
+  | {
+      type: "channel:created";
+      payload: Channel & { sequence: number };
+    }
+  | {
+      type: "channel:updated";
+      payload: Channel & { sequence: number };
+    }
+  | {
+      type: "user:updated";
+      payload: User & { sequence: number };
+    }
+  | {
+      type: "workspace:updated";
+      payload: Workspace & { sequence: number };
+    }
+  | {
+      type: "audit:new";
+      payload: AuditLogEntry & { sequence: number };
+    }
+  | {
       type: "presence:changed";
       payload: { userId: string; state: PresenceState; sequence: number };
     }
@@ -79,8 +131,11 @@ export type ServerEvent =
   | {
       type: "sync:snapshot";
       payload: {
+        users: User[];
+        channels: Channel[];
         messages: Message[];
         onlineUserIds: string[];
+        workspace: Workspace;
         cursor: SyncCursor;
       };
     }
