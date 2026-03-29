@@ -47,13 +47,22 @@ Bridge is a privacy-first team messaging platform with real-time sync, workspace
    ```bash
    docker compose up -d
    ```
-4. Run both apps:
+4. Run DB migrations:
+   ```bash
+   npm run db:migrate -w @bridge/server
+   ```
+5. Run both apps:
    ```bash
    npm run dev
    ```
 
 - Web: http://localhost:5173
 - API: http://localhost:4000
+
+### Server environment
+
+- `DATABASE_URL` points to Postgres (for migrations and upcoming persistent storage)
+- `RUN_MIGRATIONS_ON_BOOT=true` optionally applies migrations on server startup
 
 ## Admin API
 
