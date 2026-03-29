@@ -108,7 +108,7 @@ Implemented:
 - Realtime WebSocket sync with authenticated user binding
 - Basic server-side message search endpoint
 
-## Open Work Before Mattermost Replacement
+## Open Work
 
 Still required for production replacement:
 
