@@ -151,7 +151,7 @@ async function resolveActorId(
   if (typeof raw === "string" && raw.trim().length > 0) {
     return raw.trim();
   }
-  return "u-1";
+  return null;
 }
 
 async function requireAdmin(
@@ -580,7 +580,17 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     wss.on("connection", async (socket, request) => {
       sockets.add(socket);
       const requestLike = { headers: request.headers } as FastifyRequest;
-      const actorId = (await resolveActorId(requestLike, true)) ?? "u-1";
+      const actorId = await resolveActorId(requestLike, true);
+      if (!actorId) {
+        socket.send(
+          JSON.stringify({
+            type: "error",
+            payload: { message: "unauthorized websocket connection" }
+          } satisfies ServerEvent)
+        );
+        socket.close();
+        return;
+      }
 
       socket.send(
         JSON.stringify({
