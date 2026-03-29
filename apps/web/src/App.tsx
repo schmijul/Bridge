@@ -37,6 +37,10 @@ type BootstrapPayload = {
   cursor: { sequence: number };
 };
 
+type MePayload = {
+  user: User;
+};
+
 const apiBase = import.meta.env.VITE_API_URL ?? "http://localhost:4000";
 const wsUrl = import.meta.env.VITE_WS_URL ?? "ws://localhost:4000";
 
@@ -54,6 +58,9 @@ export function App() {
 
   const [status, setStatus] = useState("connecting");
   const [notice, setNotice] = useState<string>("");
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [loginEmail, setLoginEmail] = useState("alex@bridge.local");
+  const [loginPassword, setLoginPassword] = useState("bridge123!");
   const [draft, setDraft] = useState("");
   const [activeChannelId, setActiveChannelId] = useState("c-general");
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
@@ -107,7 +114,7 @@ export function App() {
   }, [users, onlineUserIds, visibleChannels, messages]);
 
   async function loadBootstrap() {
-    const response = await fetch(`${apiBase}/bootstrap`);
+    const response = await fetch(`${apiBase}/bootstrap`, { credentials: "include" });
     if (!response.ok) {
       throw new Error("bootstrap request failed");
     }
@@ -125,6 +132,7 @@ export function App() {
 
   async function loadAdminOverview() {
     const response = await fetch(`${apiBase}/admin/overview`, {
+      credentials: "include",
       headers: {
         "x-user-id": currentUserId
       }
@@ -141,9 +149,58 @@ export function App() {
     setEnforceMfa(payload.workspace.settings.enforceMfaForAdmins);
   }
 
+  async function loadCurrentUser() {
+    const response = await fetch(`${apiBase}/auth/me`, {
+      credentials: "include"
+    });
+    if (!response.ok) {
+      setIsAuthenticated(false);
+      return null;
+    }
+    const payload = (await response.json()) as MePayload;
+    setCurrentUserId(payload.user.id);
+    setIsAuthenticated(true);
+    return payload.user;
+  }
+
+  async function login() {
+    const response = await fetch(`${apiBase}/auth/login`, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ email: loginEmail.trim(), password: loginPassword })
+    });
+    if (!response.ok) {
+      setNotice("Login failed. Please verify email and password.");
+      return;
+    }
+    await loadCurrentUser();
+    await loadBootstrap();
+    setNotice("");
+  }
+
+  async function logout() {
+    await fetch(`${apiBase}/auth/logout`, {
+      method: "POST",
+      credentials: "include"
+    });
+    setIsAuthenticated(false);
+    setStatus("offline");
+    socketRef.current?.close();
+    socketRef.current = null;
+  }
+
   useEffect(() => {
-    loadBootstrap()
-      .then(() => setStatus("online"))
+    loadCurrentUser()
+      .then((user) => {
+        if (!user) {
+          setStatus("auth required");
+          return;
+        }
+        return loadBootstrap().then(() => setStatus("online"));
+      })
       .catch(() => setStatus("api unavailable"));
 
     const socket = new WebSocket(wsUrl);
@@ -275,6 +332,7 @@ export function App() {
   async function adminRequest(path: string, init?: RequestInit): Promise<Response> {
     const response = await fetch(`${apiBase}${path}`, {
       ...init,
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
         "x-user-id": currentUserId,
@@ -425,6 +483,43 @@ export function App() {
     setDraft("");
   }
 
+  if (!isAuthenticated) {
+    return (
+      <main className="layout">
+        <section className="chat">
+          <header className="chatHeader">
+            <div>
+              <h2>Sign in to Bridge</h2>
+              <p>Use your company credentials to access chat and admin tools.</p>
+            </div>
+          </header>
+
+          <form
+            className="composer"
+            onSubmit={(event) => {
+              event.preventDefault();
+              login().catch(() => setNotice("Login failed."));
+            }}
+          >
+            <input
+              value={loginEmail}
+              onChange={(event) => setLoginEmail(event.target.value)}
+              placeholder="email@company.com"
+            />
+            <input
+              value={loginPassword}
+              onChange={(event) => setLoginPassword(event.target.value)}
+              type="password"
+              placeholder="password"
+            />
+            <button type="submit">Sign In</button>
+          </form>
+          {notice ? <p className="notice">{notice}</p> : null}
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="layout">
       <aside className="sidebar">
@@ -438,24 +533,12 @@ export function App() {
           <span>{status}</span>
         </div>
 
-        <label className="fieldLabel" htmlFor="active-user">
-          Active User
-        </label>
-        <select
-          id="active-user"
-          className="selectInput"
-          value={currentUserId}
-          onChange={(event) => setCurrentUserId(event.target.value)}
-        >
-          {users
-            .slice()
-            .sort((a, b) => roleOrder.indexOf(a.role) - roleOrder.indexOf(b.role))
-            .map((user) => (
-              <option key={user.id} value={user.id}>
-                {user.displayName} ({user.role})
-              </option>
-            ))}
-        </select>
+        <div className="fieldLabel">
+          Signed in as {currentUser?.displayName ?? currentUserId}
+        </div>
+        <button className="tabButton" onClick={() => logout().catch(() => setNotice("Logout failed."))}>
+          Logout
+        </button>
 
         <div className="tabRow">
           <button

@@ -58,6 +58,7 @@ Bridge is a privacy-first team messaging platform with real-time sync, workspace
 
 - Web: http://localhost:5173
 - API: http://localhost:4000
+- Web now uses session login (`/auth/login`) before entering the workspace
 
 ### Server environment
 
