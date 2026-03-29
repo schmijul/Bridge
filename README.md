@@ -97,6 +97,34 @@ Default local dev credentials:
 - `sam@bridge.local` / `bridge123!`
 - `nina@bridge.local` / `bridge123!`
 
+## Current Status
+
+Implemented:
+
+- Session login/logout (`/auth/*`) with cookie-based auth
+- Admin board role checks and moderation flows
+- Optional Postgres-backed persistence (`STORE_DRIVER=postgres`)
+- Database migrations (`001_init.sql`, `002_auth.sql`)
+- Realtime WebSocket sync with authenticated user binding
+- Basic server-side message search endpoint
+
+## Open Work Before Mattermost Replacement
+
+Still required for production replacement:
+
+- Remove legacy `x-user-id` fallback and enforce session auth only
+- Channel membership/ACL model (access control per channel)
+- Direct messages and group direct messages
+- Threads/replies, mentions, unread counters, and robust read-state UX
+- Attachments (S3/MinIO), upload limits, and malware scanning strategy
+- Better search (indexing quality, ranking, pagination, retention awareness)
+- Redis-backed presence/pub-sub for reliable multi-instance scaling
+- Rate limits and brute-force protections at auth/API boundary
+- Observability stack (metrics, tracing/log correlation, alerting)
+- Backup/restore automation with restore verification in CI/staging
+- Mattermost migration tooling (users/channels and optional history)
+- Desktop/mobile clients (Phase 2) and notification strategy
+
 ## Validation Pipeline
 
 Run all local checks:
