@@ -190,7 +190,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
   attachRealtime: () => void;
 }> {
   const app = Fastify({ logger: { level: "info" } });
-  await app.register(cors, { origin: corsOrigin });
+  await app.register(cors, { origin: corsOrigin, credentials: true });
   await app.register(cookie);
 
   const sockets = new Set<WebSocket>();

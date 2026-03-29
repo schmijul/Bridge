@@ -202,7 +202,12 @@ export function App() {
         return loadBootstrap().then(() => setStatus("online"));
       })
       .catch(() => setStatus("api unavailable"));
+  }, []);
 
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
     const socket = new WebSocket(wsUrl);
     socketRef.current = socket;
 
@@ -300,7 +305,7 @@ export function App() {
       socket.close();
       socketRef.current = null;
     };
-  }, []);
+  }, [isAuthenticated, currentUserId]);
 
   useEffect(() => {
     if (workspace) {
