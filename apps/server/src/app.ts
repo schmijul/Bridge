@@ -1,5 +1,6 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
+import cookie from "@fastify/cookie";
 import { WebSocketServer, type WebSocket } from "ws";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -16,6 +17,7 @@ import {
   deleteMessage,
   getAdminOverview,
   getOnlineUserIds,
+  getUserByEmail,
   getUserById,
   inviteUser,
   messages,
@@ -28,6 +30,13 @@ import {
   users,
   workspace
 } from "./store.js";
+import {
+  createSession,
+  deleteSession,
+  getUserIdFromSession,
+  setPassword,
+  verifyPassword
+} from "./auth.js";
 
 const messageSendSchema = z.object({
   type: z.literal("message:send"),
@@ -104,15 +113,54 @@ const updateWorkspaceSchema = z.object({
   enforceMfaForAdmins: z.boolean().optional()
 });
 
-function actorFromHeaders(raw: unknown): string {
-  if (typeof raw !== "string" || raw.trim().length === 0) {
-    return "u-1";
+const loginSchema = z.object({
+  email: z.string().trim().email(),
+  password: z.string().min(8).max(256)
+});
+
+function sessionIdFromCookie(cookieHeader: unknown): string | undefined {
+  if (typeof cookieHeader !== "string") {
+    return undefined;
   }
-  return raw.trim();
+  const rawCookie = cookieHeader
+    .split(";")
+    .map((entry) => entry.trim())
+    .find((entry) => entry.startsWith("bridge_session="));
+  if (!rawCookie) {
+    return undefined;
+  }
+  const value = rawCookie.slice("bridge_session=".length);
+  return value.length > 0 ? value : undefined;
 }
 
-function requireAdmin(rawActor: unknown): { ok: true; actorId: string } | { ok: false; reason: string } {
-  const actorId = actorFromHeaders(rawActor);
+async function resolveActorId(
+  request: FastifyRequest,
+  fallbackToHeader: boolean
+): Promise<string | null> {
+  const sessionId = sessionIdFromCookie(request.headers.cookie);
+  const userIdFromSession = await getUserIdFromSession(sessionId);
+  if (userIdFromSession) {
+    return userIdFromSession;
+  }
+
+  if (!fallbackToHeader) {
+    return null;
+  }
+
+  const raw = request.headers["x-user-id"];
+  if (typeof raw === "string" && raw.trim().length > 0) {
+    return raw.trim();
+  }
+  return "u-1";
+}
+
+async function requireAdmin(
+  request: FastifyRequest
+): Promise<{ ok: true; actorId: string } | { ok: false; reason: string }> {
+  const actorId = await resolveActorId(request, true);
+  if (!actorId) {
+    return { ok: false, reason: "unauthorized" };
+  }
   const actor = getUserById(actorId);
   if (!actor) {
     return { ok: false, reason: "unknown actor" };
@@ -129,6 +177,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
 }> {
   const app = Fastify({ logger: { level: "info" } });
   await app.register(cors, { origin: corsOrigin });
+  await app.register(cookie);
 
   const sockets = new Set<WebSocket>();
 
@@ -182,8 +231,62 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     };
   });
 
+  app.post("/auth/login", async (request, reply) => {
+    const parsed = loginSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid login payload" });
+    }
+
+    const user = getUserByEmail(parsed.data.email);
+    if (!user || !user.isActive) {
+      return reply.code(401).send({ message: "invalid credentials" });
+    }
+
+    const ok = await verifyPassword(user.id, parsed.data.password);
+    if (!ok) {
+      return reply.code(401).send({ message: "invalid credentials" });
+    }
+
+    const { sessionId, expiresAt } = await createSession(user.id);
+    reply.setCookie("bridge_session", sessionId, {
+      httpOnly: true,
+      sameSite: "lax",
+      path: "/",
+      secure: false,
+      expires: new Date(expiresAt)
+    });
+
+    return {
+      user: {
+        id: user.id,
+        displayName: user.displayName,
+        email: user.email,
+        role: user.role
+      }
+    };
+  });
+
+  app.get("/auth/me", async (request, reply) => {
+    const actorId = await resolveActorId(request, true);
+    if (!actorId) {
+      return reply.code(401).send({ message: "unauthorized" });
+    }
+    const user = getUserById(actorId);
+    if (!user || !user.isActive) {
+      return reply.code(401).send({ message: "unauthorized" });
+    }
+    return { user };
+  });
+
+  app.post("/auth/logout", async (request, reply) => {
+    const sessionId = sessionIdFromCookie(request.headers.cookie);
+    await deleteSession(sessionId);
+    reply.clearCookie("bridge_session", { path: "/" });
+    return { ok: true };
+  });
+
   app.get("/admin/overview", async (request, reply) => {
-    const auth = requireAdmin(request.headers["x-user-id"]);
+    const auth = await requireAdmin(request);
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
     }
@@ -191,7 +294,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
   });
 
   app.post("/admin/channels", async (request, reply) => {
-    const auth = requireAdmin(request.headers["x-user-id"]);
+    const auth = await requireAdmin(request);
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
     }
@@ -224,7 +327,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
   });
 
   app.patch("/admin/channels/:channelId", async (request, reply) => {
-    const auth = requireAdmin(request.headers["x-user-id"]);
+    const auth = await requireAdmin(request);
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
     }
@@ -258,7 +361,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
   });
 
   app.post("/admin/users", async (request, reply) => {
-    const auth = requireAdmin(request.headers["x-user-id"]);
+    const auth = await requireAdmin(request);
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
     }
@@ -276,6 +379,8 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     if (userEvent.type !== "user:updated") {
       return reply.code(500).send({ message: "unexpected user event type" });
     }
+    await setPassword(userEvent.payload.id, "welcome123");
+
     const auditEvent = appendAuditLog({
       action: "user.invited",
       actorId: auth.actorId,
@@ -291,7 +396,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
   });
 
   app.patch("/admin/users/:userId/role", async (request, reply) => {
-    const auth = requireAdmin(request.headers["x-user-id"]);
+    const auth = await requireAdmin(request);
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
     }
@@ -325,7 +430,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
   });
 
   app.patch("/admin/users/:userId/status", async (request, reply) => {
-    const auth = requireAdmin(request.headers["x-user-id"]);
+    const auth = await requireAdmin(request);
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
     }
@@ -359,7 +464,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
   });
 
   app.patch("/admin/settings", async (request, reply) => {
-    const auth = requireAdmin(request.headers["x-user-id"]);
+    const auth = await requireAdmin(request);
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
     }
@@ -393,7 +498,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
   });
 
   app.delete("/admin/messages/:messageId", async (request, reply) => {
-    const auth = requireAdmin(request.headers["x-user-id"]);
+    const auth = await requireAdmin(request);
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
     }
@@ -421,8 +526,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
   const attachRealtime = () => {
     const wss = new WebSocketServer({ server: app.server });
 
-    wss.on("connection", (socket) => {
+    wss.on("connection", async (socket, request) => {
       sockets.add(socket);
+      const requestLike = { headers: request.headers } as FastifyRequest;
+      const actorId = (await resolveActorId(requestLike, true)) ?? "u-1";
 
       socket.send(
         JSON.stringify({
@@ -478,12 +585,12 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
               return;
             }
 
-            const serverEvent = addMessage(event.payload.channelId, "u-1", content);
+            const serverEvent = addMessage(event.payload.channelId, actorId, content);
             broadcast(serverEvent);
           }
 
           if (event.type === "presence:update") {
-            broadcast(setPresence("u-1", event.payload.state));
+            broadcast(setPresence(actorId, event.payload.state));
           }
 
           if (event.type === "typing:update") {
@@ -499,7 +606,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
               );
               return;
             }
-            broadcast(typingChanged("u-1", event.payload.channelId, event.payload.isTyping));
+            broadcast(typingChanged(actorId, event.payload.channelId, event.payload.isTyping));
           }
 
           if (event.type === "read:update") {
@@ -531,7 +638,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
               return;
             }
 
-            broadcast(setReadState("u-1", event.payload.channelId, event.payload.lastMessageId));
+            broadcast(setReadState(actorId, event.payload.channelId, event.payload.lastMessageId));
           }
         } catch {
           socket.send(
@@ -545,7 +652,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
 
       socket.on("close", () => {
         sockets.delete(socket);
-        broadcast(setPresence("u-1", "offline"));
+        broadcast(setPresence(actorId, "offline"));
       });
     });
   };

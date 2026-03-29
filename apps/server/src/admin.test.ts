@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createBridgeApp } from "./app.js";
-import { resetStore } from "./store.js";
+import { initAuth } from "./auth.js";
+import { resetStore, users } from "./store.js";
 
 async function makeApp() {
   resetStore();
+  await initAuth(users);
   const { app } = await createBridgeApp("http://localhost:5173");
   return app;
 }
@@ -106,4 +108,32 @@ test("admins can create channels and adjust workspace settings", async (t) => {
   });
   assert.equal(updateSettings.statusCode, 200);
   assert.equal(updateSettings.json().workspace.settings.workspaceName, "Bridge Enterprise");
+});
+
+test("auth login issues a cookie and allows admin access without x-user-id", async (t) => {
+  const app = await makeApp();
+  t.after(async () => {
+    await app.close();
+  });
+
+  const login = await app.inject({
+    method: "POST",
+    url: "/auth/login",
+    payload: {
+      email: "alex@bridge.local",
+      password: "bridge123!"
+    }
+  });
+  assert.equal(login.statusCode, 200);
+  const cookie = login.cookies.find((entry) => entry.name === "bridge_session");
+  assert.ok(cookie);
+
+  const overview = await app.inject({
+    method: "GET",
+    url: "/admin/overview",
+    cookies: {
+      bridge_session: cookie.value
+    }
+  });
+  assert.equal(overview.statusCode, 200);
 });

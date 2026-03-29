@@ -67,7 +67,7 @@ Bridge is a privacy-first team messaging platform with real-time sync, workspace
 
 ## Admin API
 
-Admin endpoints are protected by role and expect `x-user-id` in request headers.
+Admin endpoints are protected by role. Session cookie auth is preferred; `x-user-id` remains a compatibility fallback during migration.
 
 - `GET /admin/overview`
 - `POST /admin/channels`
@@ -77,6 +77,18 @@ Admin endpoints are protected by role and expect `x-user-id` in request headers.
 - `PATCH /admin/users/:userId/status`
 - `PATCH /admin/settings`
 - `DELETE /admin/messages/:messageId`
+
+## Auth API
+
+- `POST /auth/login` with `{ email, password }`
+- `GET /auth/me`
+- `POST /auth/logout`
+
+Default local dev credentials:
+
+- `alex@bridge.local` / `bridge123!`
+- `sam@bridge.local` / `bridge123!`
+- `nina@bridge.local` / `bridge123!`
 
 ## Validation Pipeline
 

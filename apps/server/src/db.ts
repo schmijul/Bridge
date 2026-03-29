@@ -35,7 +35,7 @@ export async function closeDbPool(): Promise<void> {
 }
 
 export async function runMigrations(): Promise<void> {
-  const migrationFiles = ["001_init.sql"];
+  const migrationFiles = ["001_init.sql", "002_auth.sql"];
   const db = getDbPool();
   await db.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (

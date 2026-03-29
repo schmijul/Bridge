@@ -414,6 +414,11 @@ export function getUserById(userId: string): User | undefined {
   return users.find((user) => user.id === userId);
 }
 
+export function getUserByEmail(email: string): User | undefined {
+  const normalized = email.trim().toLowerCase();
+  return users.find((user) => user.email.toLowerCase() === normalized);
+}
+
 export function setPresence(userId: string, state: PresenceState): ServerEvent {
   const now = new Date().toISOString();
   presence.set(userId, state);

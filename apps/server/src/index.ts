@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { createBridgeApp } from "./app.js";
 import { runMigrations } from "./db.js";
-import { initStore } from "./store.js";
+import { initStore, users } from "./store.js";
+import { initAuth } from "./auth.js";
 
 const envSchema = z.object({
   PORT: z.coerce.number().default(4000),
@@ -20,6 +21,7 @@ if (env.STORE_DRIVER === "postgres" && env.RUN_MIGRATIONS_ON_BOOT) {
 }
 
 await initStore();
+await initAuth(users);
 
 const { app, attachRealtime } = await createBridgeApp(env.CORS_ORIGIN);
 const server = await app.listen({ port: env.PORT, host: "0.0.0.0" });
