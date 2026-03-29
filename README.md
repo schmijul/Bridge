@@ -62,7 +62,8 @@ Bridge is a privacy-first team messaging platform with real-time sync, workspace
 ### Server environment
 
 - `DATABASE_URL` points to Postgres (for migrations and upcoming persistent storage)
-- `RUN_MIGRATIONS_ON_BOOT=true` optionally applies migrations on server startup
+- `STORE_DRIVER=postgres` enables persistent storage; use `memory` for local test-only mode
+- `RUN_MIGRATIONS_ON_BOOT=true` applies migrations on server startup in Postgres mode
 
 ## Admin API
 
