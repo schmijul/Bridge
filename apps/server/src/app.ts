@@ -171,6 +171,20 @@ async function requireAdmin(
   return { ok: true, actorId };
 }
 
+async function requireAuthenticated(
+  request: FastifyRequest
+): Promise<{ ok: true; actorId: string } | { ok: false; reason: string }> {
+  const actorId = await resolveActorId(request, true);
+  if (!actorId) {
+    return { ok: false, reason: "unauthorized" };
+  }
+  const actor = getUserById(actorId);
+  if (!actor || !actor.isActive) {
+    return { ok: false, reason: "unauthorized" };
+  }
+  return { ok: true, actorId };
+}
+
 export async function createBridgeApp(corsOrigin: string): Promise<{
   app: FastifyInstance;
   attachRealtime: () => void;
@@ -276,6 +290,43 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
       return reply.code(401).send({ message: "unauthorized" });
     }
     return { user };
+  });
+
+  app.get("/search/messages", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+
+    const querySchema = z.object({
+      q: z.string().trim().min(2).max(120),
+      limit: z.coerce.number().int().min(1).max(100).default(20)
+    });
+    const parsed = querySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid search query" });
+    }
+
+    const q = parsed.data.q.toLowerCase();
+    const results = messages
+      .filter((message) => message.content.toLowerCase().includes(q))
+      .slice(-parsed.data.limit)
+      .reverse()
+      .map((message) => {
+        const sender = getUserById(message.senderId);
+        const channel = channels.find((entry) => entry.id === message.channelId);
+        return {
+          ...message,
+          senderDisplayName: sender?.displayName ?? message.senderId,
+          channelName: channel?.name ?? "unknown"
+        };
+      });
+
+    return {
+      query: parsed.data.q,
+      count: results.length,
+      results
+    };
   });
 
   app.post("/auth/logout", async (request, reply) => {

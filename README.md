@@ -84,6 +84,10 @@ Admin endpoints are protected by role. Session cookie auth is preferred; `x-user
 - `GET /auth/me`
 - `POST /auth/logout`
 
+## Search API
+
+- `GET /search/messages?q=<term>&limit=20` (session required)
+
 Default local dev credentials:
 
 - `alex@bridge.local` / `bridge123!`
