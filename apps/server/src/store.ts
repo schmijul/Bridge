@@ -60,6 +60,7 @@ function makeInitialChannels(): Channel[] {
     {
       id: "c-general",
       workspaceId,
+      kind: "channel",
       name: "general",
       isPrivate: false,
       description: "Announcements and cross-team updates"
@@ -67,6 +68,7 @@ function makeInitialChannels(): Channel[] {
     {
       id: "c-product",
       workspaceId,
+      kind: "channel",
       name: "product",
       isPrivate: false,
       description: "Roadmap, planning and feature delivery"
@@ -74,6 +76,7 @@ function makeInitialChannels(): Channel[] {
     {
       id: "c-support",
       workspaceId,
+      kind: "channel",
       name: "support",
       isPrivate: false,
       description: "Customer issues and escalation workflow"
@@ -184,14 +187,16 @@ async function seedDatabaseFromMemory(): Promise<void> {
 
     for (const channel of channels) {
       await db.query(
-        `INSERT INTO channels (id, workspace_id, name, is_private, description, archived_at)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
+        `INSERT INTO channels (id, workspace_id, kind, name, is_private, description, dm_key, archived_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [
           channel.id,
           channel.workspaceId,
+          channel.kind,
           channel.name,
           channel.isPrivate,
           channel.description,
+          channel.dmKey ?? null,
           channel.archivedAt ?? null
         ]
       );
@@ -305,9 +310,11 @@ async function loadStoreFromDatabase(): Promise<boolean> {
   const channelsResult = await db.query<{
     id: string;
     workspace_id: string;
+    kind: Channel["kind"];
     name: string;
     is_private: boolean;
     description: string;
+    dm_key: string | null;
     archived_at: Date | string | null;
   }>("SELECT * FROM channels ORDER BY name ASC");
   channels.splice(
@@ -316,9 +323,11 @@ async function loadStoreFromDatabase(): Promise<boolean> {
     ...channelsResult.rows.map((row) => ({
       id: row.id,
       workspaceId: row.workspace_id,
+      kind: row.kind,
       name: row.name,
       isPrivate: row.is_private,
       description: row.description,
+      dmKey: row.dm_key ?? undefined,
       archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : undefined
     }))
   );
@@ -456,7 +465,7 @@ export function isUserAllowedInChannel(userId: string, channelId: string): boole
   if (!user || !user.isActive) {
     return false;
   }
-  if (user.role === "admin" || user.role === "manager") {
+  if (channel.kind === "channel" && (user.role === "admin" || user.role === "manager")) {
     return true;
   }
 
@@ -484,7 +493,7 @@ export function addChannelMember(
   if (!channel || channel.archivedAt) {
     return { ok: false, reason: "channel_not_found" };
   }
-  if (!channel.isPrivate) {
+  if (!channel.isPrivate || channel.kind !== "channel") {
     return { ok: false, reason: "channel_not_private" };
   }
 
@@ -516,7 +525,7 @@ export function removeChannelMember(
   if (!channel || channel.archivedAt) {
     return { ok: false, reason: "channel_not_found" };
   }
-  if (!channel.isPrivate) {
+  if (!channel.isPrivate || channel.kind !== "channel") {
     return { ok: false, reason: "channel_not_private" };
   }
 
@@ -651,6 +660,7 @@ export function createChannel(input: {
   const channel: Channel = {
     id: `c-${randomUUID()}`,
     workspaceId,
+    kind: "channel",
     name: input.name,
     description: input.description,
     isPrivate: input.isPrivate
@@ -665,9 +675,9 @@ export function createChannel(input: {
   enqueuePersist(async () => {
     const db = getDbPool();
     await db.query(
-      `INSERT INTO channels (id, workspace_id, name, is_private, description, archived_at)
-       VALUES ($1, $2, $3, $4, $5, NULL)`,
-      [channel.id, channel.workspaceId, channel.name, channel.isPrivate, channel.description]
+      `INSERT INTO channels (id, workspace_id, kind, name, is_private, description, dm_key, archived_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL)`,
+      [channel.id, channel.workspaceId, channel.kind, channel.name, channel.isPrivate, channel.description]
     );
     if (channel.isPrivate && input.creatorId) {
       await db.query(
@@ -683,6 +693,78 @@ export function createChannel(input: {
     type: "channel:created",
     payload: { ...channel, sequence: nextSequenceInternal() }
   };
+}
+
+export function getDirectConversationsForUser(userId: string): Channel[] {
+  return getChannelsForUser(userId).filter((channel) => channel.kind === "dm" || channel.kind === "group_dm");
+}
+
+export function createDirectConversation(
+  actorId: string,
+  participantUserIds: string[]
+): { channel: Channel; created: boolean; participantIds: string[] } {
+  const participants = Array.from(new Set([...participantUserIds, actorId])).sort();
+  const kind: Channel["kind"] = participants.length === 2 ? "dm" : "group_dm";
+  const dmKey = kind === "dm" ? participants.join(":") : undefined;
+
+  if (dmKey) {
+    const existing = channels.find(
+      (channel) => channel.kind === "dm" && !channel.archivedAt && channel.dmKey === dmKey
+    );
+    if (existing) {
+      for (const userId of participants) {
+        const members = channelMembership.get(existing.id) ?? new Set<string>();
+        members.add(userId);
+        channelMembership.set(existing.id, members);
+      }
+      return { channel: existing, created: false, participantIds: participants };
+    }
+  }
+
+  const suffix = participants.map((id) => id.replace(/^u-/, "")).join("-").slice(0, 28);
+  const channel: Channel = {
+    id: `c-${randomUUID()}`,
+    workspaceId,
+    kind,
+    name: kind === "dm" ? `dm-${suffix}` : `group-${suffix}`,
+    isPrivate: true,
+    description: kind === "dm" ? "Direct message conversation" : "Group direct message conversation",
+    dmKey
+  };
+  channels.push(channel);
+
+  for (const userId of participants) {
+    const members = channelMembership.get(channel.id) ?? new Set<string>();
+    members.add(userId);
+    channelMembership.set(channel.id, members);
+  }
+
+  enqueuePersist(async () => {
+    const db = getDbPool();
+    await db.query(
+      `INSERT INTO channels (id, workspace_id, kind, name, is_private, description, dm_key, archived_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)`,
+      [
+        channel.id,
+        channel.workspaceId,
+        channel.kind,
+        channel.name,
+        channel.isPrivate,
+        channel.description,
+        channel.dmKey ?? null
+      ]
+    );
+    for (const userId of participants) {
+      await db.query(
+        `INSERT INTO channel_memberships (channel_id, user_id, added_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (channel_id, user_id) DO NOTHING`,
+        [channel.id, userId]
+      );
+    }
+  });
+
+  return { channel, created: true, participantIds: participants };
 }
 
 export function archiveChannel(channelId: string): ServerEvent | null {

@@ -93,6 +93,11 @@ Admin endpoints are protected by role and require a valid session cookie.
 
 - `GET /search/messages?q=<term>&limit=20` (session required)
 
+## Direct Message API
+
+- `GET /dm/conversations` (session required)
+- `POST /dm/conversations` with `{ participantUserIds: string[] }` (session required)
+
 ## Bootstrap API
 
 - `GET /bootstrap` (session required; channels/messages are ACL-filtered per user)
@@ -110,8 +115,9 @@ Implemented:
 - Session login/logout (`/auth/*`) with cookie-based auth
 - Admin board role checks and moderation flows
 - Channel membership/ACL controls for private channels
+- Direct messages and group direct message conversations
 - Optional Postgres-backed persistence (`STORE_DRIVER=postgres`)
-- Database migrations (`001_init.sql`, `002_auth.sql`, `003_channel_acl.sql`)
+- Database migrations (`001_init.sql`, `002_auth.sql`, `003_channel_acl.sql`, `004_direct_messages.sql`)
 - Realtime WebSocket sync with authenticated user binding
 - Basic server-side message search endpoint
 
@@ -119,7 +125,6 @@ Implemented:
 
 Still required for production replacement:
 
-- Direct messages and group direct messages
 - Threads/replies, mentions, unread counters, and robust read-state UX
 - Attachments (S3/MinIO), upload limits, and malware scanning strategy
 - Better search (indexing quality, ranking, pagination, retention awareness)

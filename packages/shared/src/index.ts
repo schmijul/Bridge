@@ -13,9 +13,11 @@ export interface User {
 export interface Channel {
   id: string;
   workspaceId: string;
+  kind: "channel" | "dm" | "group_dm";
   name: string;
   isPrivate: boolean;
   description: string;
+  dmKey?: string;
   archivedAt?: string;
 }
 

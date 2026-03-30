@@ -14,12 +14,15 @@ import {
   addChannelMember,
   channels,
   createChannel,
+  createDirectConversation,
   currentSequence,
   deleteMessage,
   getChannelMemberIds,
   getChannelsForUser,
+  getDirectConversationsForUser,
   getAdminOverview,
   getMessagesForUser,
+  nextSequence,
   getOnlineUserIds,
   getUserByEmail,
   getUserById,
@@ -126,6 +129,10 @@ const updateWorkspaceSchema = z.object({
 const loginSchema = z.object({
   email: z.string().trim().email(),
   password: z.string().min(8).max(256)
+});
+
+const createConversationSchema = z.object({
+  participantUserIds: z.array(z.string().trim().min(1)).min(1).max(11)
 });
 
 function sessionIdFromCookie(cookieHeader: unknown): string | undefined {
@@ -365,6 +372,68 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     await deleteSession(sessionId);
     reply.clearCookie("bridge_session", { path: "/" });
     return { ok: true };
+  });
+
+  app.get("/dm/conversations", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    return {
+      conversations: getDirectConversationsForUser(auth.actorId)
+    };
+  });
+
+  app.post("/dm/conversations", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+
+    const parsed = createConversationSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid conversation payload" });
+    }
+
+    const participantIds = Array.from(new Set([...parsed.data.participantUserIds, auth.actorId]));
+    if (participantIds.length < 2 || participantIds.length > 12) {
+      return reply
+        .code(400)
+        .send({ message: "conversation must include between 2 and 12 active participants" });
+    }
+
+    const inactiveOrMissing = participantIds.find((userId) => {
+      const user = getUserById(userId);
+      return !user || !user.isActive;
+    });
+    if (inactiveOrMissing) {
+      return reply.code(404).send({ message: `user not found: ${inactiveOrMissing}` });
+    }
+
+    const created = createDirectConversation(auth.actorId, participantIds);
+    if (created.created) {
+      const channelEvent: ServerEvent = {
+        type: "channel:created",
+        payload: { ...created.channel, sequence: nextSequence() }
+      };
+      const auditEvent = appendAuditLog({
+        action: "conversation.created",
+        actorId: auth.actorId,
+        targetType: "channel",
+        targetId: created.channel.id,
+        summary:
+          created.channel.kind === "dm"
+            ? "Created direct message conversation"
+            : "Created group direct message conversation"
+      });
+      broadcast(channelEvent);
+      broadcast(auditEvent);
+    }
+
+    return reply.code(created.created ? 201 : 200).send({
+      conversation: created.channel,
+      participantIds: created.participantIds
+    });
   });
 
   app.get("/admin/overview", async (request, reply) => {
