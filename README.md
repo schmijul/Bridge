@@ -70,7 +70,7 @@ Screenshots below were refreshed for the current session-based login flow.
 
 ## Admin API
 
-Admin endpoints are protected by role. Session cookie auth is preferred; `x-user-id` remains a compatibility fallback during migration.
+Admin endpoints are protected by role and require a valid session cookie.
 
 - `GET /admin/overview`
 - `POST /admin/channels`
@@ -112,7 +112,6 @@ Implemented:
 
 Still required for production replacement:
 
-- Remove legacy `x-user-id` fallback and enforce session auth only
 - Channel membership/ACL model (access control per channel)
 - Direct messages and group direct messages
 - Threads/replies, mentions, unread counters, and robust read-state UX

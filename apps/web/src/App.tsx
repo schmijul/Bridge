@@ -132,10 +132,7 @@ export function App() {
 
   async function loadAdminOverview() {
     const response = await fetch(`${apiBase}/admin/overview`, {
-      credentials: "include",
-      headers: {
-        "x-user-id": currentUserId
-      }
+      credentials: "include"
     });
     if (!response.ok) {
       return;
@@ -340,7 +337,6 @@ export function App() {
       credentials: "include",
       headers: {
         "Content-Type": "application/json",
-        "x-user-id": currentUserId,
         ...(init?.headers ?? {})
       }
     });

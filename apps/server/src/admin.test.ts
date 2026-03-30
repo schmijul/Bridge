@@ -11,16 +11,29 @@ async function makeApp() {
   return app;
 }
 
+async function loginAs(app: Awaited<ReturnType<typeof makeApp>>, email: string, password: string) {
+  const login = await app.inject({
+    method: "POST",
+    url: "/auth/login",
+    payload: { email, password }
+  });
+  assert.equal(login.statusCode, 200);
+  const cookie = login.cookies.find((entry) => entry.name === "bridge_session");
+  assert.ok(cookie);
+  return cookie.value;
+}
+
 test("admin endpoints reject non-admin users", async (t) => {
   const app = await makeApp();
   t.after(async () => {
     await app.close();
   });
 
+  const sessionId = await loginAs(app, "nina@bridge.local", "bridge123!");
   const response = await app.inject({
     method: "GET",
     url: "/admin/overview",
-    headers: { "x-user-id": "u-3" }
+    cookies: { bridge_session: sessionId }
   });
 
   assert.equal(response.statusCode, 403);
@@ -33,10 +46,11 @@ test("admins can create and manage users", async (t) => {
     await app.close();
   });
 
+  const sessionId = await loginAs(app, "alex@bridge.local", "bridge123!");
   const invite = await app.inject({
     method: "POST",
     url: "/admin/users",
-    headers: { "x-user-id": "u-1" },
+    cookies: { bridge_session: sessionId },
     payload: {
       displayName: "Jordan",
       email: "jordan@bridge.local",
@@ -51,7 +65,7 @@ test("admins can create and manage users", async (t) => {
   const roleUpdate = await app.inject({
     method: "PATCH",
     url: `/admin/users/${invited.id}/role`,
-    headers: { "x-user-id": "u-1" },
+    cookies: { bridge_session: sessionId },
     payload: { role: "manager" }
   });
   assert.equal(roleUpdate.statusCode, 200);
@@ -60,7 +74,7 @@ test("admins can create and manage users", async (t) => {
   const statusUpdate = await app.inject({
     method: "PATCH",
     url: `/admin/users/${invited.id}/status`,
-    headers: { "x-user-id": "u-1" },
+    cookies: { bridge_session: sessionId },
     payload: { isActive: false }
   });
   assert.equal(statusUpdate.statusCode, 200);
@@ -73,10 +87,11 @@ test("admins can create channels and adjust workspace settings", async (t) => {
     await app.close();
   });
 
+  const sessionId = await loginAs(app, "sam@bridge.local", "bridge123!");
   const createChannel = await app.inject({
     method: "POST",
     url: "/admin/channels",
-    headers: { "x-user-id": "u-2" },
+    cookies: { bridge_session: sessionId },
     payload: {
       name: "engineering",
       description: "Engineering planning and release work",
@@ -89,7 +104,7 @@ test("admins can create channels and adjust workspace settings", async (t) => {
   const archiveChannel = await app.inject({
     method: "PATCH",
     url: `/admin/channels/${channelId}`,
-    headers: { "x-user-id": "u-2" },
+    cookies: { bridge_session: sessionId },
     payload: { archived: true }
   });
   assert.equal(archiveChannel.statusCode, 200);
@@ -98,7 +113,7 @@ test("admins can create channels and adjust workspace settings", async (t) => {
   const updateSettings = await app.inject({
     method: "PATCH",
     url: "/admin/settings",
-    headers: { "x-user-id": "u-2" },
+    cookies: { bridge_session: sessionId },
     payload: {
       workspaceName: "Bridge Enterprise",
       messageRetentionDays: 730,
@@ -110,7 +125,7 @@ test("admins can create channels and adjust workspace settings", async (t) => {
   assert.equal(updateSettings.json().workspace.settings.workspaceName, "Bridge Enterprise");
 });
 
-test("auth login issues a cookie and allows admin access without x-user-id", async (t) => {
+test("auth login issues a cookie and allows admin access", async (t) => {
   const app = await makeApp();
   t.after(async () => {
     await app.close();

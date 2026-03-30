@@ -133,23 +133,11 @@ function sessionIdFromCookie(cookieHeader: unknown): string | undefined {
   return value.length > 0 ? value : undefined;
 }
 
-async function resolveActorId(
-  request: FastifyRequest,
-  fallbackToHeader: boolean
-): Promise<string | null> {
+async function resolveActorId(request: FastifyRequest): Promise<string | null> {
   const sessionId = sessionIdFromCookie(request.headers.cookie);
   const userIdFromSession = await getUserIdFromSession(sessionId);
   if (userIdFromSession) {
     return userIdFromSession;
-  }
-
-  if (!fallbackToHeader) {
-    return null;
-  }
-
-  const raw = request.headers["x-user-id"];
-  if (typeof raw === "string" && raw.trim().length > 0) {
-    return raw.trim();
   }
   return null;
 }
@@ -157,7 +145,7 @@ async function resolveActorId(
 async function requireAdmin(
   request: FastifyRequest
 ): Promise<{ ok: true; actorId: string } | { ok: false; reason: string }> {
-  const actorId = await resolveActorId(request, true);
+  const actorId = await resolveActorId(request);
   if (!actorId) {
     return { ok: false, reason: "unauthorized" };
   }
@@ -174,7 +162,7 @@ async function requireAdmin(
 async function requireAuthenticated(
   request: FastifyRequest
 ): Promise<{ ok: true; actorId: string } | { ok: false; reason: string }> {
-  const actorId = await resolveActorId(request, true);
+  const actorId = await resolveActorId(request);
   if (!actorId) {
     return { ok: false, reason: "unauthorized" };
   }
@@ -281,7 +269,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
   });
 
   app.get("/auth/me", async (request, reply) => {
-    const actorId = await resolveActorId(request, true);
+    const actorId = await resolveActorId(request);
     if (!actorId) {
       return reply.code(401).send({ message: "unauthorized" });
     }
@@ -580,7 +568,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     wss.on("connection", async (socket, request) => {
       sockets.add(socket);
       const requestLike = { headers: request.headers } as FastifyRequest;
-      const actorId = await resolveActorId(requestLike, true);
+      const actorId = await resolveActorId(requestLike);
       if (!actorId) {
         socket.send(
           JSON.stringify({
