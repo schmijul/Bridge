@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -137,6 +137,69 @@ const createConversationSchema = z.object({
   participantUserIds: z.array(z.string().trim().min(1)).min(1).max(11)
 });
 
+type RateLimitDecision = {
+  allowed: boolean;
+  retryAfterSeconds: number;
+};
+
+function createFixedWindowRateLimiter(maxHits: number, windowMs: number): {
+  consume: (key: string) => RateLimitDecision;
+  inspect: (key: string) => RateLimitDecision;
+  reset: (key: string) => void;
+} {
+  const buckets = new Map<string, { count: number; windowStartMs: number }>();
+  function inspect(key: string): RateLimitDecision {
+    const now = Date.now();
+    const current = buckets.get(key);
+    if (!current || now - current.windowStartMs >= windowMs) {
+      return { allowed: true, retryAfterSeconds: 0 };
+    }
+    if (current.count >= maxHits) {
+      const retryAfterMs = Math.max(0, windowMs - (now - current.windowStartMs));
+      return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil(retryAfterMs / 1000)) };
+    }
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+  return {
+    inspect,
+    consume(key: string): RateLimitDecision {
+      const state = inspect(key);
+      if (!state.allowed) {
+        return state;
+      }
+      const now = Date.now();
+      const current = buckets.get(key);
+      if (!current || now - current.windowStartMs >= windowMs) {
+        buckets.set(key, { count: 1, windowStartMs: now });
+        return { allowed: true, retryAfterSeconds: 0 };
+      }
+      current.count += 1;
+      buckets.set(key, current);
+      return { allowed: true, retryAfterSeconds: 0 };
+    },
+    reset(key: string): void {
+      buckets.delete(key);
+    }
+  };
+}
+
+function envNumber(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function getClientAddress(request: FastifyRequest): string {
+  const forwarded = request.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim().length > 0) {
+    return forwarded.split(",")[0]!.trim();
+  }
+  return request.ip;
+}
+
 function sessionIdFromCookie(cookieHeader: unknown): string | undefined {
   if (typeof cookieHeader !== "string") {
     return undefined;
@@ -210,7 +273,19 @@ async function requireAuthenticated(
   return { ok: true, actorId };
 }
 
-export async function createBridgeApp(corsOrigin: string): Promise<{
+export async function createBridgeApp(
+  corsOrigin: string,
+  options?: {
+    rateLimit?: {
+      authLoginMax?: number;
+      authLoginWindowMs?: number;
+      authFailureMax?: number;
+      authFailureWindowMs?: number;
+      apiMax?: number;
+      apiWindowMs?: number;
+    };
+  }
+): Promise<{
   app: FastifyInstance;
   attachRealtime: () => void;
 }> {
@@ -220,6 +295,36 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
 
   const sockets = new Set<WebSocket>();
   const socketActorId = new Map<WebSocket, string>();
+  const loginLimiter = createFixedWindowRateLimiter(
+    options?.rateLimit?.authLoginMax ?? envNumber("AUTH_LOGIN_RATE_LIMIT_MAX", 20),
+    options?.rateLimit?.authLoginWindowMs ?? envNumber("AUTH_LOGIN_RATE_LIMIT_WINDOW_MS", 5 * 60 * 1000)
+  );
+  const loginFailureLimiter = createFixedWindowRateLimiter(
+    options?.rateLimit?.authFailureMax ?? envNumber("AUTH_LOGIN_FAILURE_LIMIT_MAX", 6),
+    options?.rateLimit?.authFailureWindowMs ??
+      envNumber("AUTH_LOGIN_FAILURE_LIMIT_WINDOW_MS", 15 * 60 * 1000)
+  );
+  const apiLimiter = createFixedWindowRateLimiter(
+    options?.rateLimit?.apiMax ?? envNumber("API_RATE_LIMIT_MAX", 180),
+    options?.rateLimit?.apiWindowMs ?? envNumber("API_RATE_LIMIT_WINDOW_MS", 60 * 1000)
+  );
+
+  function rejectRateLimited(reply: FastifyReply, retryAfterSeconds: number): FastifyReply {
+    reply.header("retry-after", String(retryAfterSeconds));
+    return reply.code(429).send({ message: "rate limit exceeded", retryAfterSeconds });
+  }
+
+  function enforceApiRateLimit(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    actorId: string
+  ): FastifyReply | null {
+    const decision = apiLimiter.consume(`${actorId}|${getClientAddress(request)}`);
+    if (!decision.allowed) {
+      return rejectRateLimited(reply, decision.retryAfterSeconds);
+    }
+    return null;
+  }
 
   function eventChannelId(event: ServerEvent): string | null {
     if (event.type === "message:new") {
@@ -292,6 +397,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     if (!auth.ok) {
       return reply.code(401).send({ message: auth.reason });
     }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
     return {
       users,
       channels: getChannelsForUser(auth.actorId),
@@ -303,20 +412,41 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
   });
 
   app.post("/auth/login", async (request, reply) => {
+    const clientAddress = getClientAddress(request);
+    const loginBurst = loginLimiter.consume(clientAddress);
+    if (!loginBurst.allowed) {
+      return rejectRateLimited(reply, loginBurst.retryAfterSeconds);
+    }
+
     const parsed = loginSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ message: "invalid login payload" });
     }
 
+    const authAttemptKey = `${parsed.data.email.toLowerCase()}|${clientAddress}`;
+    const failureWindow = loginFailureLimiter.inspect(authAttemptKey);
+    if (!failureWindow.allowed) {
+      return rejectRateLimited(reply, failureWindow.retryAfterSeconds);
+    }
+
     const user = getUserByEmail(parsed.data.email);
     if (!user || !user.isActive) {
+      const failed = loginFailureLimiter.consume(authAttemptKey);
+      if (!failed.allowed) {
+        return rejectRateLimited(reply, failed.retryAfterSeconds);
+      }
       return reply.code(401).send({ message: "invalid credentials" });
     }
 
     const ok = await verifyPassword(user.id, parsed.data.password);
     if (!ok) {
+      const failed = loginFailureLimiter.consume(authAttemptKey);
+      if (!failed.allowed) {
+        return rejectRateLimited(reply, failed.retryAfterSeconds);
+      }
       return reply.code(401).send({ message: "invalid credentials" });
     }
+    loginFailureLimiter.reset(authAttemptKey);
 
     const { sessionId, expiresAt } = await createSession(user.id);
     reply.setCookie("bridge_session", sessionId, {
@@ -342,6 +472,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     if (!actorId) {
       return reply.code(401).send({ message: "unauthorized" });
     }
+    const limited = enforceApiRateLimit(request, reply, actorId);
+    if (limited) {
+      return limited;
+    }
     const user = getUserById(actorId);
     if (!user || !user.isActive) {
       return reply.code(401).send({ message: "unauthorized" });
@@ -353,6 +487,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     const auth = await requireAuthenticated(request);
     if (!auth.ok) {
       return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
     }
 
     const querySchema = z.object({
@@ -388,6 +526,13 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
   });
 
   app.post("/auth/logout", async (request, reply) => {
+    const actorId = await resolveActorId(request);
+    if (actorId) {
+      const limited = enforceApiRateLimit(request, reply, actorId);
+      if (limited) {
+        return limited;
+      }
+    }
     const sessionId = sessionIdFromCookie(request.headers.cookie);
     await deleteSession(sessionId);
     reply.clearCookie("bridge_session", { path: "/" });
@@ -399,6 +544,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     if (!auth.ok) {
       return reply.code(401).send({ message: auth.reason });
     }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
     return {
       conversations: getDirectConversationsForUser(auth.actorId)
     };
@@ -408,6 +557,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     const auth = await requireAuthenticated(request);
     if (!auth.ok) {
       return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
     }
     const counts = getUnreadCountsForUser(auth.actorId);
     return {
@@ -420,6 +573,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     const auth = await requireAuthenticated(request);
     if (!auth.ok) {
       return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
     }
 
     const parsed = createConversationSchema.safeParse(request.body);
@@ -473,6 +630,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
     }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
     return getAdminOverview();
   });
 
@@ -480,6 +641,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     const auth = await requireAdmin(request);
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
     }
 
     const parsed = createChannelSchema.safeParse(request.body);
@@ -514,6 +679,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
     }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
 
     const parsed = archiveChannelSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -547,6 +716,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     const auth = await requireAdmin(request);
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
     }
 
     const parsed = channelMemberSchema.safeParse(request.body);
@@ -590,6 +763,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
     }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
 
     const params = z.object({ channelId: z.string().min(1), userId: z.string().min(1) }).parse(
       request.params
@@ -626,6 +803,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
     }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
 
     const parsed = inviteUserSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -661,6 +842,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
     }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
 
     const parsed = updateUserRoleSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -694,6 +879,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     const auth = await requireAdmin(request);
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
     }
 
     const parsed = updateUserStatusSchema.safeParse(request.body);
@@ -729,6 +918,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
     }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
 
     const parsed = updateWorkspaceSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -762,6 +955,10 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     const auth = await requireAdmin(request);
     if (!auth.ok) {
       return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
     }
 
     const messageId = z.string().parse((request.params as { messageId: string }).messageId);

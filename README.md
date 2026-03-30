@@ -67,6 +67,9 @@ Screenshots below were refreshed for the current session-based login flow.
 - `DATABASE_URL` points to Postgres (for migrations and upcoming persistent storage)
 - `STORE_DRIVER=postgres` enables persistent storage; use `memory` for local test-only mode
 - `RUN_MIGRATIONS_ON_BOOT=true` applies migrations on server startup in Postgres mode
+- `AUTH_LOGIN_RATE_LIMIT_MAX` and `AUTH_LOGIN_RATE_LIMIT_WINDOW_MS` tune login burst throttling
+- `AUTH_LOGIN_FAILURE_LIMIT_MAX` and `AUTH_LOGIN_FAILURE_LIMIT_WINDOW_MS` tune login brute-force lockout
+- `API_RATE_LIMIT_MAX` and `API_RATE_LIMIT_WINDOW_MS` tune authenticated API throttling
 
 ## Admin API
 
@@ -123,6 +126,7 @@ Implemented:
 - Threads/replies with `threadRootMessageId` metadata
 - Mentions metadata extraction on message send (`mentionUserIds`)
 - Unread counters endpoint and server-side read-state tracking (`GET /me/unread`)
+- Auth/API boundary rate limiting and brute-force protections (`429` + `retry-after`)
 - Optional Postgres-backed persistence (`STORE_DRIVER=postgres`)
 - Database migrations (`001_init.sql`, `002_auth.sql`, `003_channel_acl.sql`, `004_direct_messages.sql`, `005_threads_mentions.sql`)
 - Realtime WebSocket sync with authenticated user binding
@@ -135,7 +139,6 @@ Still required for production replacement:
 - Attachments (S3/MinIO), upload limits, and malware scanning strategy
 - Better search (indexing quality, ranking, pagination, retention awareness)
 - Redis-backed presence/pub-sub for reliable multi-instance scaling
-- Rate limits and brute-force protections at auth/API boundary
 - Observability stack (metrics, tracing/log correlation, alerting)
 - Backup/restore automation with restore verification in CI/staging
 - Mattermost migration tooling (users/channels and optional history)
