@@ -46,7 +46,14 @@ if [ "$server_ready" != "true" ]; then
 fi
 
 HEALTH_JSON="$(curl -fsS "http://localhost:4010/health")"
-BOOTSTRAP_JSON="$(curl -fsS "http://localhost:4010/bootstrap")"
+
+COOKIE_JAR="/tmp/bridge-smoke-cookie.txt"
+rm -f "$COOKIE_JAR"
+curl -fsS -c "$COOKIE_JAR" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alex@bridge.local","password":"bridge123!"}' \
+  "http://localhost:4010/auth/login" >/dev/null
+BOOTSTRAP_JSON="$(curl -fsS -b "$COOKIE_JAR" "http://localhost:4010/bootstrap")"
 
 echo "$HEALTH_JSON" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'
 echo "$HEALTH_JSON" | grep -Eq '"analyticsEnabled"[[:space:]]*:[[:space:]]*false'

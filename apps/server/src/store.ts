@@ -122,6 +122,7 @@ export const auditLog: AuditLogEntry[] = [];
 
 const presence = new Map<string, PresenceState>();
 const readState = new Map<string, ReadState>();
+const channelMembership = new Map<string, Set<string>>();
 let sequence = 0;
 let persistQueue: Promise<void> = Promise.resolve();
 
@@ -145,6 +146,7 @@ function setInMemoryDefaults(now: string): void {
   presence.clear();
   presence.set("u-1", "online");
   readState.clear();
+  channelMembership.clear();
   sequence = 0;
 }
 
@@ -193,6 +195,17 @@ async function seedDatabaseFromMemory(): Promise<void> {
           channel.archivedAt ?? null
         ]
       );
+    }
+
+    for (const [channelId, userIds] of channelMembership.entries()) {
+      for (const userId of userIds) {
+        await db.query(
+          `INSERT INTO channel_memberships (channel_id, user_id, added_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (channel_id, user_id) DO NOTHING`,
+          [channelId, userId]
+        );
+      }
     }
 
     for (const message of messages) {
@@ -375,6 +388,17 @@ async function loadStoreFromDatabase(): Promise<boolean> {
     });
   }
 
+  const membershipResult = await db.query<{
+    channel_id: string;
+    user_id: string;
+  }>("SELECT channel_id, user_id FROM channel_memberships");
+  channelMembership.clear();
+  for (const row of membershipResult.rows) {
+    const members = channelMembership.get(row.channel_id) ?? new Set<string>();
+    members.add(row.user_id);
+    channelMembership.set(row.channel_id, members);
+  }
+
   const sequenceResult = await db.query<{ current_value: number }>(
     "SELECT current_value FROM event_sequence WHERE id = 1"
   );
@@ -417,6 +441,104 @@ export function getUserById(userId: string): User | undefined {
 export function getUserByEmail(email: string): User | undefined {
   const normalized = email.trim().toLowerCase();
   return users.find((user) => user.email.toLowerCase() === normalized);
+}
+
+export function isUserAllowedInChannel(userId: string, channelId: string): boolean {
+  const channel = channels.find((candidate) => candidate.id === channelId);
+  if (!channel || channel.archivedAt) {
+    return false;
+  }
+  if (!channel.isPrivate) {
+    return true;
+  }
+
+  const user = getUserById(userId);
+  if (!user || !user.isActive) {
+    return false;
+  }
+  if (user.role === "admin" || user.role === "manager") {
+    return true;
+  }
+
+  const members = channelMembership.get(channelId);
+  return members?.has(userId) ?? false;
+}
+
+export function getChannelsForUser(userId: string): Channel[] {
+  return channels.filter((channel) => isUserAllowedInChannel(userId, channel.id));
+}
+
+export function getMessagesForUser(userId: string): Message[] {
+  return messages.filter((message) => isUserAllowedInChannel(userId, message.channelId));
+}
+
+export function getChannelMemberIds(channelId: string): string[] {
+  return [...(channelMembership.get(channelId) ?? new Set<string>())];
+}
+
+export function addChannelMember(
+  channelId: string,
+  userId: string
+): { ok: true; alreadyMember: boolean } | { ok: false; reason: "channel_not_found" | "channel_not_private" } {
+  const channel = channels.find((candidate) => candidate.id === channelId);
+  if (!channel || channel.archivedAt) {
+    return { ok: false, reason: "channel_not_found" };
+  }
+  if (!channel.isPrivate) {
+    return { ok: false, reason: "channel_not_private" };
+  }
+
+  const members = channelMembership.get(channelId) ?? new Set<string>();
+  const alreadyMember = members.has(userId);
+  members.add(userId);
+  channelMembership.set(channelId, members);
+
+  if (!alreadyMember) {
+    enqueuePersist(async () => {
+      const db = getDbPool();
+      await db.query(
+        `INSERT INTO channel_memberships (channel_id, user_id, added_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (channel_id, user_id) DO NOTHING`,
+        [channelId, userId]
+      );
+    });
+  }
+
+  return { ok: true, alreadyMember };
+}
+
+export function removeChannelMember(
+  channelId: string,
+  userId: string
+): { ok: true; wasMember: boolean } | { ok: false; reason: "channel_not_found" | "channel_not_private" } {
+  const channel = channels.find((candidate) => candidate.id === channelId);
+  if (!channel || channel.archivedAt) {
+    return { ok: false, reason: "channel_not_found" };
+  }
+  if (!channel.isPrivate) {
+    return { ok: false, reason: "channel_not_private" };
+  }
+
+  const members = channelMembership.get(channelId);
+  const wasMember = members?.has(userId) ?? false;
+  members?.delete(userId);
+
+  if (members && members.size === 0) {
+    channelMembership.delete(channelId);
+  }
+
+  if (wasMember) {
+    enqueuePersist(async () => {
+      const db = getDbPool();
+      await db.query("DELETE FROM channel_memberships WHERE channel_id = $1 AND user_id = $2", [
+        channelId,
+        userId
+      ]);
+    });
+  }
+
+  return { ok: true, wasMember };
 }
 
 export function setPresence(userId: string, state: PresenceState): ServerEvent {
@@ -480,7 +602,7 @@ export function deleteMessage(messageId: string): ServerEvent | null {
   if (index === -1) {
     return null;
   }
-  messages.splice(index, 1);
+  const [removedMessage] = messages.splice(index, 1);
 
   enqueuePersist(async () => {
     const db = getDbPool();
@@ -489,7 +611,7 @@ export function deleteMessage(messageId: string): ServerEvent | null {
 
   return {
     type: "message:deleted",
-    payload: { messageId, sequence: nextSequenceInternal() }
+    payload: { messageId, channelId: removedMessage.channelId, sequence: nextSequenceInternal() }
   };
 }
 
@@ -524,6 +646,7 @@ export function createChannel(input: {
   name: string;
   description: string;
   isPrivate: boolean;
+  creatorId?: string;
 }): ServerEvent {
   const channel: Channel = {
     id: `c-${randomUUID()}`,
@@ -533,6 +656,11 @@ export function createChannel(input: {
     isPrivate: input.isPrivate
   };
   channels.push(channel);
+  if (channel.isPrivate && input.creatorId) {
+    const members = channelMembership.get(channel.id) ?? new Set<string>();
+    members.add(input.creatorId);
+    channelMembership.set(channel.id, members);
+  }
 
   enqueuePersist(async () => {
     const db = getDbPool();
@@ -541,6 +669,14 @@ export function createChannel(input: {
        VALUES ($1, $2, $3, $4, $5, NULL)`,
       [channel.id, channel.workspaceId, channel.name, channel.isPrivate, channel.description]
     );
+    if (channel.isPrivate && input.creatorId) {
+      await db.query(
+        `INSERT INTO channel_memberships (channel_id, user_id, added_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (channel_id, user_id) DO NOTHING`,
+        [channel.id, input.creatorId]
+      );
+    }
   });
 
   return {

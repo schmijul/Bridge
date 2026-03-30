@@ -84,7 +84,7 @@ export type ServerEvent =
     }
   | {
       type: "message:deleted";
-      payload: { messageId: string; sequence: number };
+      payload: { messageId: string; channelId: string; sequence: number };
     }
   | {
       type: "channel:created";

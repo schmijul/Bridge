@@ -11,16 +11,22 @@ import {
   addMessage,
   appendAuditLog,
   archiveChannel,
+  addChannelMember,
   channels,
   createChannel,
   currentSequence,
   deleteMessage,
+  getChannelMemberIds,
+  getChannelsForUser,
   getAdminOverview,
+  getMessagesForUser,
   getOnlineUserIds,
   getUserByEmail,
   getUserById,
   inviteUser,
+  isUserAllowedInChannel,
   messages,
+  removeChannelMember,
   setPresence,
   setReadState,
   setUserActive,
@@ -90,6 +96,10 @@ const createChannelSchema = z.object({
 
 const archiveChannelSchema = z.object({
   archived: z.literal(true)
+});
+
+const channelMemberSchema = z.object({
+  userId: z.string().trim().min(1)
 });
 
 const inviteUserSchema = z.object({
@@ -182,10 +192,38 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
   await app.register(cookie);
 
   const sockets = new Set<WebSocket>();
+  const socketActorId = new Map<WebSocket, string>();
+
+  function eventChannelId(event: ServerEvent): string | null {
+    if (event.type === "message:new") {
+      return event.payload.channelId;
+    }
+    if (event.type === "message:deleted") {
+      return event.payload.channelId;
+    }
+    if (event.type === "typing:changed") {
+      return event.payload.channelId;
+    }
+    if (event.type === "read:changed") {
+      return event.payload.channelId;
+    }
+    if (event.type === "channel:created" || event.type === "channel:updated") {
+      return event.payload.id;
+    }
+    return null;
+  }
 
   function broadcast(event: ServerEvent): void {
     const encoded = JSON.stringify(event);
     for (const socket of sockets) {
+      const actorId = socketActorId.get(socket);
+      if (!actorId) {
+        continue;
+      }
+      const channelId = eventChannelId(event);
+      if (channelId && !isUserAllowedInChannel(actorId, channelId)) {
+        continue;
+      }
       if (socket.readyState === socket.OPEN) {
         socket.send(encoded);
       }
@@ -222,11 +260,15 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     };
   });
 
-  app.get("/bootstrap", async () => {
+  app.get("/bootstrap", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
     return {
       users,
-      channels,
-      messages,
+      channels: getChannelsForUser(auth.actorId),
+      messages: getMessagesForUser(auth.actorId),
       onlineUserIds: getOnlineUserIds(),
       workspace,
       cursor: { sequence: currentSequence() }
@@ -297,6 +339,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
 
     const q = parsed.data.q.toLowerCase();
     const results = messages
+      .filter((message) => isUserAllowedInChannel(auth.actorId, message.channelId))
       .filter((message) => message.content.toLowerCase().includes(q))
       .slice(-parsed.data.limit)
       .reverse()
@@ -347,7 +390,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
       return reply.code(409).send({ message: "channel name already exists" });
     }
 
-    const channelEvent = createChannel(parsed.data);
+    const channelEvent = createChannel({ ...parsed.data, creatorId: auth.actorId });
     if (channelEvent.type !== "channel:created") {
       return reply.code(500).send({ message: "unexpected channel event type" });
     }
@@ -397,6 +440,84 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     broadcast(auditEvent);
 
     return { channel: channelEvent.payload };
+  });
+
+  app.post("/admin/channels/:channelId/members", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+
+    const parsed = channelMemberSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid channel member payload" });
+    }
+
+    const channelId = z.string().parse((request.params as { channelId: string }).channelId);
+    const targetUser = getUserById(parsed.data.userId);
+    if (!targetUser || !targetUser.isActive) {
+      return reply.code(404).send({ message: "user not found" });
+    }
+
+    const membership = addChannelMember(channelId, parsed.data.userId);
+    if (!membership.ok) {
+      if (membership.reason === "channel_not_private") {
+        return reply.code(400).send({ message: "channel is not private" });
+      }
+      return reply.code(404).send({ message: "channel not found" });
+    }
+
+    if (!membership.alreadyMember) {
+      const auditEvent = appendAuditLog({
+        action: "channel.member.added",
+        actorId: auth.actorId,
+        targetType: "channel",
+        targetId: channelId,
+        summary: `Added ${targetUser.displayName} to channel membership`
+      });
+      broadcast(auditEvent);
+    }
+
+    return reply.code(membership.alreadyMember ? 200 : 201).send({
+      channelId,
+      members: getChannelMemberIds(channelId)
+    });
+  });
+
+  app.delete("/admin/channels/:channelId/members/:userId", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+
+    const params = z.object({ channelId: z.string().min(1), userId: z.string().min(1) }).parse(
+      request.params
+    );
+    const targetUser = getUserById(params.userId);
+    if (!targetUser) {
+      return reply.code(404).send({ message: "user not found" });
+    }
+
+    const membership = removeChannelMember(params.channelId, params.userId);
+    if (!membership.ok) {
+      if (membership.reason === "channel_not_private") {
+        return reply.code(400).send({ message: "channel is not private" });
+      }
+      return reply.code(404).send({ message: "channel not found" });
+    }
+
+    if (membership.wasMember) {
+      const auditEvent = appendAuditLog({
+        action: "channel.member.removed",
+        actorId: auth.actorId,
+        targetType: "channel",
+        targetId: params.channelId,
+        summary: `Removed ${targetUser.displayName} from channel membership`
+      });
+      broadcast(auditEvent);
+    }
+
+    return { channelId: params.channelId, members: getChannelMemberIds(params.channelId) };
   });
 
   app.post("/admin/users", async (request, reply) => {
@@ -566,7 +687,6 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     const wss = new WebSocketServer({ server: app.server });
 
     wss.on("connection", async (socket, request) => {
-      sockets.add(socket);
       const requestLike = { headers: request.headers } as FastifyRequest;
       const actorId = await resolveActorId(requestLike);
       if (!actorId) {
@@ -580,13 +700,16 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
         return;
       }
 
+      sockets.add(socket);
+      socketActorId.set(socket, actorId);
+
       socket.send(
         JSON.stringify({
           type: "sync:snapshot",
           payload: {
             users,
-            channels,
-            messages,
+            channels: getChannelsForUser(actorId),
+            messages: getMessagesForUser(actorId),
             onlineUserIds: getOnlineUserIds(),
             workspace,
             cursor: { sequence: currentSequence() }
@@ -633,6 +756,15 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
               );
               return;
             }
+            if (!isUserAllowedInChannel(actorId, event.payload.channelId)) {
+              socket.send(
+                JSON.stringify({
+                  type: "error",
+                  payload: { message: "forbidden channel access" }
+                } satisfies ServerEvent)
+              );
+              return;
+            }
 
             const serverEvent = addMessage(event.payload.channelId, actorId, content);
             broadcast(serverEvent);
@@ -655,6 +787,15 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
               );
               return;
             }
+            if (!isUserAllowedInChannel(actorId, event.payload.channelId)) {
+              socket.send(
+                JSON.stringify({
+                  type: "error",
+                  payload: { message: "forbidden channel access" }
+                } satisfies ServerEvent)
+              );
+              return;
+            }
             broadcast(typingChanged(actorId, event.payload.channelId, event.payload.isTyping));
           }
 
@@ -667,6 +808,15 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
                 JSON.stringify({
                   type: "error",
                   payload: { message: "channel not found" }
+                } satisfies ServerEvent)
+              );
+              return;
+            }
+            if (!isUserAllowedInChannel(actorId, event.payload.channelId)) {
+              socket.send(
+                JSON.stringify({
+                  type: "error",
+                  payload: { message: "forbidden channel access" }
                 } satisfies ServerEvent)
               );
               return;
@@ -701,6 +851,7 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
 
       socket.on("close", () => {
         sockets.delete(socket);
+        socketActorId.delete(socket);
         broadcast(setPresence(actorId, "offline"));
       });
     });

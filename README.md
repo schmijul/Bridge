@@ -75,6 +75,8 @@ Admin endpoints are protected by role and require a valid session cookie.
 - `GET /admin/overview`
 - `POST /admin/channels`
 - `PATCH /admin/channels/:channelId`
+- `POST /admin/channels/:channelId/members`
+- `DELETE /admin/channels/:channelId/members/:userId`
 - `POST /admin/users`
 - `PATCH /admin/users/:userId/role`
 - `PATCH /admin/users/:userId/status`
@@ -91,6 +93,10 @@ Admin endpoints are protected by role and require a valid session cookie.
 
 - `GET /search/messages?q=<term>&limit=20` (session required)
 
+## Bootstrap API
+
+- `GET /bootstrap` (session required; channels/messages are ACL-filtered per user)
+
 Default local dev credentials:
 
 - `alex@bridge.local` / `bridge123!`
@@ -103,8 +109,9 @@ Implemented:
 
 - Session login/logout (`/auth/*`) with cookie-based auth
 - Admin board role checks and moderation flows
+- Channel membership/ACL controls for private channels
 - Optional Postgres-backed persistence (`STORE_DRIVER=postgres`)
-- Database migrations (`001_init.sql`, `002_auth.sql`)
+- Database migrations (`001_init.sql`, `002_auth.sql`, `003_channel_acl.sql`)
 - Realtime WebSocket sync with authenticated user binding
 - Basic server-side message search endpoint
 
@@ -112,7 +119,6 @@ Implemented:
 
 Still required for production replacement:
 
-- Channel membership/ACL model (access control per channel)
 - Direct messages and group direct messages
 - Threads/replies, mentions, unread counters, and robust read-state UX
 - Attachments (S3/MinIO), upload limits, and malware scanning strategy
