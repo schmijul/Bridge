@@ -93,6 +93,10 @@ Admin endpoints are protected by role and require a valid session cookie.
 
 - `GET /search/messages?q=<term>&limit=20` (session required)
 
+## Unread API
+
+- `GET /me/unread` (session required)
+
 ## Direct Message API
 
 - `GET /dm/conversations` (session required)
@@ -116,8 +120,11 @@ Implemented:
 - Admin board role checks and moderation flows
 - Channel membership/ACL controls for private channels
 - Direct messages and group direct message conversations
+- Threads/replies with `threadRootMessageId` metadata
+- Mentions metadata extraction on message send (`mentionUserIds`)
+- Unread counters endpoint and server-side read-state tracking (`GET /me/unread`)
 - Optional Postgres-backed persistence (`STORE_DRIVER=postgres`)
-- Database migrations (`001_init.sql`, `002_auth.sql`, `003_channel_acl.sql`, `004_direct_messages.sql`)
+- Database migrations (`001_init.sql`, `002_auth.sql`, `003_channel_acl.sql`, `004_direct_messages.sql`, `005_threads_mentions.sql`)
 - Realtime WebSocket sync with authenticated user binding
 - Basic server-side message search endpoint
 
@@ -125,7 +132,6 @@ Implemented:
 
 Still required for production replacement:
 
-- Threads/replies, mentions, unread counters, and robust read-state UX
 - Attachments (S3/MinIO), upload limits, and malware scanning strategy
 - Better search (indexing quality, ranking, pagination, retention awareness)
 - Redis-backed presence/pub-sub for reliable multi-instance scaling

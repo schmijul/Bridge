@@ -27,6 +27,8 @@ export interface Message {
   senderId: string;
   content: string;
   createdAt: string;
+  threadRootMessageId?: string;
+  mentionUserIds?: string[];
 }
 
 export interface ReadState {
@@ -64,7 +66,12 @@ export interface AuditLogEntry {
 export type ClientEvent =
   | {
       type: "message:send";
-      payload: { channelId: string; content: string; tempId: string };
+      payload: {
+        channelId: string;
+        content: string;
+        tempId: string;
+        threadRootMessageId?: string;
+      };
     }
   | {
       type: "presence:update";

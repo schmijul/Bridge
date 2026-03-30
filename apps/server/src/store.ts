@@ -91,14 +91,16 @@ function makeInitialMessages(now: string): Message[] {
       channelId: "c-general",
       senderId: "u-1",
       content: "Welcome to Bridge. Please use threads for decisions.",
-      createdAt: now
+      createdAt: now,
+      mentionUserIds: []
     },
     {
       id: "m-2",
       channelId: "c-product",
       senderId: "u-2",
       content: "Release freeze on Friday at 14:00.",
-      createdAt: now
+      createdAt: now,
+      mentionUserIds: []
     }
   ];
 }
@@ -215,9 +217,18 @@ async function seedDatabaseFromMemory(): Promise<void> {
 
     for (const message of messages) {
       await db.query(
-        `INSERT INTO messages (id, channel_id, sender_id, content, created_at)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [message.id, message.channelId, message.senderId, message.content, message.createdAt]
+        `INSERT INTO messages
+          (id, channel_id, sender_id, content, created_at, thread_root_message_id, mention_user_ids)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::text[])`,
+        [
+          message.id,
+          message.channelId,
+          message.senderId,
+          message.content,
+          message.createdAt,
+          message.threadRootMessageId ?? null,
+          message.mentionUserIds ?? []
+        ]
       );
     }
 
@@ -338,6 +349,8 @@ async function loadStoreFromDatabase(): Promise<boolean> {
     sender_id: string;
     content: string;
     created_at: Date | string;
+    thread_root_message_id: string | null;
+    mention_user_ids: string[] | null;
   }>("SELECT * FROM messages ORDER BY created_at ASC");
   messages.splice(
     0,
@@ -347,7 +360,9 @@ async function loadStoreFromDatabase(): Promise<boolean> {
       channelId: row.channel_id,
       senderId: row.sender_id,
       content: row.content,
-      createdAt: new Date(row.created_at).toISOString()
+      createdAt: new Date(row.created_at).toISOString(),
+      threadRootMessageId: row.thread_root_message_id ?? undefined,
+      mentionUserIds: row.mention_user_ids ?? []
     }))
   );
 
@@ -581,22 +596,50 @@ export function getOnlineUserIds(): string[] {
     .map(([userId]) => userId);
 }
 
-export function addMessage(channelId: string, senderId: string, content: string): ServerEvent {
+export function addMessage(
+  channelId: string,
+  senderId: string,
+  content: string,
+  options?: { threadRootMessageId?: string; mentionUserIds?: string[] }
+): ServerEvent {
   const message: Message = {
     id: randomUUID(),
     channelId,
     senderId,
     content,
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    threadRootMessageId: options?.threadRootMessageId,
+    mentionUserIds: options?.mentionUserIds ?? []
   };
   messages.push(message);
+  readState.set(`${senderId}:${channelId}`, {
+    userId: senderId,
+    channelId,
+    lastMessageId: message.id
+  });
 
   enqueuePersist(async () => {
     const db = getDbPool();
     await db.query(
-      `INSERT INTO messages (id, channel_id, sender_id, content, created_at)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [message.id, message.channelId, message.senderId, message.content, message.createdAt]
+      `INSERT INTO messages
+        (id, channel_id, sender_id, content, created_at, thread_root_message_id, mention_user_ids)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::text[])`,
+      [
+        message.id,
+        message.channelId,
+        message.senderId,
+        message.content,
+        message.createdAt,
+        message.threadRootMessageId ?? null,
+        message.mentionUserIds ?? []
+      ]
+    );
+    await db.query(
+      `INSERT INTO read_state (user_id, channel_id, last_message_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, channel_id)
+       DO UPDATE SET last_message_id = EXCLUDED.last_message_id`,
+      [senderId, channelId, message.id]
     );
   });
 
@@ -642,6 +685,26 @@ export function setReadState(userId: string, channelId: string, lastMessageId: s
     type: "read:changed",
     payload: { userId, channelId, lastMessageId, sequence: nextSequenceInternal() }
   };
+}
+
+export function getUnreadCountsForUser(userId: string): Array<{ channelId: string; unreadCount: number }> {
+  const visible = getChannelsForUser(userId);
+  const counts: Array<{ channelId: string; unreadCount: number }> = [];
+
+  for (const channel of visible) {
+    const channelMessages = messages.filter((message) => message.channelId === channel.id);
+    const key = `${userId}:${channel.id}`;
+    const lastRead = readState.get(key);
+    const startIndex = lastRead
+      ? channelMessages.findIndex((message) => message.id === lastRead.lastMessageId) + 1
+      : 0;
+    const unreadCount = channelMessages
+      .slice(Math.max(0, startIndex))
+      .filter((message) => message.senderId !== userId).length;
+    counts.push({ channelId: channel.id, unreadCount });
+  }
+
+  return counts;
 }
 
 export function typingChanged(userId: string, channelId: string, isTyping: boolean): ServerEvent {

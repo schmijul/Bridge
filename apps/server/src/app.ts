@@ -22,6 +22,7 @@ import {
   getDirectConversationsForUser,
   getAdminOverview,
   getMessagesForUser,
+  getUnreadCountsForUser,
   nextSequence,
   getOnlineUserIds,
   getUserByEmail,
@@ -52,7 +53,8 @@ const messageSendSchema = z.object({
   payload: z.object({
     channelId: z.string().min(1),
     content: z.string().min(1).max(4000),
-    tempId: z.string().min(1)
+    tempId: z.string().min(1),
+    threadRootMessageId: z.string().min(1).optional()
   })
 });
 
@@ -148,6 +150,24 @@ function sessionIdFromCookie(cookieHeader: unknown): string | undefined {
   }
   const value = rawCookie.slice("bridge_session=".length);
   return value.length > 0 ? value : undefined;
+}
+
+function extractMentionUserIds(content: string): string[] {
+  const handles = [...content.matchAll(/@([a-z0-9_.-]{2,32})/gi)].map((match) => match[1].toLowerCase());
+  if (handles.length === 0) {
+    return [];
+  }
+  const result = new Set<string>();
+  for (const user of users) {
+    const handleCandidates = [
+      user.displayName.toLowerCase().replace(/\s+/g, ""),
+      user.email.split("@")[0]?.toLowerCase() ?? ""
+    ];
+    if (handleCandidates.some((candidate) => handles.includes(candidate))) {
+      result.add(user.id);
+    }
+  }
+  return [...result];
 }
 
 async function resolveActorId(request: FastifyRequest): Promise<string | null> {
@@ -381,6 +401,18 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
     }
     return {
       conversations: getDirectConversationsForUser(auth.actorId)
+    };
+  });
+
+  app.get("/me/unread", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const counts = getUnreadCountsForUser(auth.actorId);
+    return {
+      totalUnread: counts.reduce((acc, item) => acc + item.unreadCount, 0),
+      channels: counts
     };
   });
 
@@ -834,8 +866,23 @@ export async function createBridgeApp(corsOrigin: string): Promise<{
               );
               return;
             }
+            if (event.payload.threadRootMessageId) {
+              const root = messages.find((message) => message.id === event.payload.threadRootMessageId);
+              if (!root || root.channelId !== event.payload.channelId) {
+                socket.send(
+                  JSON.stringify({
+                    type: "error",
+                    payload: { message: "thread root message not found in channel" }
+                  } satisfies ServerEvent)
+                );
+                return;
+              }
+            }
 
-            const serverEvent = addMessage(event.payload.channelId, actorId, content);
+            const serverEvent = addMessage(event.payload.channelId, actorId, content, {
+              threadRootMessageId: event.payload.threadRootMessageId,
+              mentionUserIds: extractMentionUserIds(content)
+            });
             broadcast(serverEvent);
           }
 
