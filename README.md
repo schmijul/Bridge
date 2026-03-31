@@ -122,6 +122,10 @@ Admin endpoints are protected by role and require a valid session cookie.
 
 - `GET /ready` returns dependency readiness for store and Redis with `200` when ready and `503` when required dependencies are unhealthy
 
+## Metrics API
+
+- `GET /metrics` exposes Prometheus-compatible counters for HTTP/auth/rate-limit events
+
 ## Search API
 
 - `GET /search/messages?q=<term>&limit=20` (session required)

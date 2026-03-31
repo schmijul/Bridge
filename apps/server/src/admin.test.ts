@@ -506,3 +506,39 @@ test("readiness endpoint fails when configured redis is unreachable", async (t) 
   assert.equal(body.dependencies.redis.configured, true);
   assert.equal(body.dependencies.redis.ok, false);
 });
+
+test("metrics endpoint exposes auth and http counters", async (t) => {
+  const app = await makeApp();
+  t.after(async () => {
+    await app.close();
+  });
+
+  await app.inject({
+    method: "POST",
+    url: "/auth/login",
+    payload: {
+      email: "alex@bridge.local",
+      password: "bridge123!"
+    }
+  });
+
+  await app.inject({
+    method: "POST",
+    url: "/auth/login",
+    payload: {
+      email: "alex@bridge.local",
+      password: "wrong-password"
+    }
+  });
+
+  const metrics = await app.inject({
+    method: "GET",
+    url: "/metrics"
+  });
+
+  assert.equal(metrics.statusCode, 200);
+  assert.equal(metrics.headers["content-type"], "text/plain; version=0.0.4; charset=utf-8");
+  assert.match(metrics.body, /bridge_events_total\{event="auth\.local\.login_success"\}\s+[1-9]/);
+  assert.match(metrics.body, /bridge_events_total\{event="auth\.local\.invalid_credentials"\}\s+[1-9]/);
+  assert.match(metrics.body, /bridge_events_total\{event="http\.responses\.total"\}\s+[1-9]/);
+});

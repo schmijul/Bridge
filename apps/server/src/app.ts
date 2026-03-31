@@ -155,6 +155,8 @@ type OidcRoleGroups = {
   guest: Set<string>;
 };
 
+type CounterMap = Map<string, number>;
+
 function createFixedWindowRateLimiter(maxHits: number, windowMs: number): {
   consume: (key: string) => RateLimitDecision;
   inspect: (key: string) => RateLimitDecision;
@@ -282,6 +284,22 @@ function resolveOidcRole(groups: string[], roleGroups: OidcRoleGroups): "admin" 
 function escapeCsv(value: string): string {
   const escaped = value.replaceAll("\"", "\"\"");
   return `"${escaped}"`;
+}
+
+function incrementCounter(counters: CounterMap, name: string, by = 1): void {
+  counters.set(name, (counters.get(name) ?? 0) + by);
+}
+
+function renderPrometheusCounters(counters: CounterMap): string {
+  const lines: string[] = [
+    "# HELP bridge_events_total Bridge in-process event counters.",
+    "# TYPE bridge_events_total counter"
+  ];
+  const sorted = [...counters.entries()].sort(([a], [b]) => a.localeCompare(b));
+  for (const [name, value] of sorted) {
+    lines.push(`bridge_events_total{event=\"${name}\"} ${value}`);
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 async function checkRedisReadiness(redisUrl: string | undefined): Promise<{
@@ -561,9 +579,15 @@ export async function createBridgeApp(
     options?.rateLimit?.apiMax ?? envNumber("API_RATE_LIMIT_MAX", 180),
     options?.rateLimit?.apiWindowMs ?? envNumber("API_RATE_LIMIT_WINDOW_MS", 60 * 1000)
   );
+  const counters: CounterMap = new Map<string, number>();
+  app.addHook("onResponse", async (_request, reply) => {
+    incrementCounter(counters, "http.responses.total");
+    incrementCounter(counters, `http.responses.status.${reply.statusCode}`);
+  });
 
   function rejectRateLimited(reply: FastifyReply, retryAfterSeconds: number): FastifyReply {
     reply.header("retry-after", String(retryAfterSeconds));
+    incrementCounter(counters, "security.rate_limit.blocked");
     return reply.code(429).send({ message: "rate limit exceeded", retryAfterSeconds });
   }
 
@@ -645,6 +669,11 @@ export async function createBridgeApp(
     };
   });
 
+  app.get("/metrics", async (_request, reply) => {
+    reply.header("content-type", "text/plain; version=0.0.4; charset=utf-8");
+    return reply.send(renderPrometheusCounters(counters));
+  });
+
   app.get("/ready", async (_request, reply) => {
     const storeDriver = isPersistenceEnabled() ? "postgres" : "memory";
     let storeStatus: { ok: boolean; detail: string } = { ok: true, detail: "memory store active" };
@@ -708,6 +737,7 @@ export async function createBridgeApp(
 
     const parsed = loginSchema.safeParse(request.body);
     if (!parsed.success) {
+      incrementCounter(counters, "auth.local.invalid_payload");
       return reply.code(400).send({ message: "invalid login payload" });
     }
 
@@ -719,6 +749,7 @@ export async function createBridgeApp(
 
     const user = getUserByEmail(parsed.data.email);
     if (!user || !user.isActive) {
+      incrementCounter(counters, "auth.local.invalid_credentials");
       const failed = loginFailureLimiter.consume(authAttemptKey);
       if (!failed.allowed) {
         return rejectRateLimited(reply, failed.retryAfterSeconds);
@@ -728,6 +759,7 @@ export async function createBridgeApp(
 
     const ok = await verifyPassword(user.id, parsed.data.password);
     if (!ok) {
+      incrementCounter(counters, "auth.local.invalid_credentials");
       const failed = loginFailureLimiter.consume(authAttemptKey);
       if (!failed.allowed) {
         return rejectRateLimited(reply, failed.retryAfterSeconds);
@@ -735,6 +767,7 @@ export async function createBridgeApp(
       return reply.code(401).send({ message: "invalid credentials" });
     }
     loginFailureLimiter.reset(authAttemptKey);
+    incrementCounter(counters, "auth.local.login_success");
 
     const previousSessionId = sessionIdFromCookie(request.headers.cookie);
     await deleteSession(previousSessionId);
@@ -780,11 +813,13 @@ export async function createBridgeApp(
     const groupsHeader = request.headers[oidcGroupsHeader];
     const email = (Array.isArray(emailHeader) ? emailHeader[0] : emailHeader)?.trim().toLowerCase();
     if (!email) {
+      incrementCounter(counters, "auth.oidc.missing_identity");
       return reply.code(401).send({ message: "missing oidc identity headers" });
     }
 
     const user = getUserByEmail(email);
     if (!user || !user.isActive) {
+      incrementCounter(counters, "auth.oidc.unprovisioned_or_inactive");
       return reply.code(403).send({ message: "oidc user is not provisioned or inactive" });
     }
 
@@ -806,6 +841,7 @@ export async function createBridgeApp(
         })
       );
     }
+    incrementCounter(counters, "auth.oidc.login_success");
 
     const previousSessionId = sessionIdFromCookie(request.headers.cookie);
     await deleteSession(previousSessionId);
@@ -908,6 +944,11 @@ export async function createBridgeApp(
     }
     const sessionId = sessionIdFromCookie(request.headers.cookie);
     await deleteSession(sessionId);
+    if (actorId) {
+      incrementCounter(counters, "auth.logout.success");
+    } else {
+      incrementCounter(counters, "auth.logout.anonymous");
+    }
     reply.clearCookie(
       "bridge_session",
       clearSessionCookieConfig(sessionCookieSecure, sessionCookieSameSite, sessionCookieDomain)
