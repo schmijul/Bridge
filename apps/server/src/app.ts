@@ -36,6 +36,7 @@ import {
   removeChannelMember,
   setPresence,
   setReadState,
+  runRetentionSweep,
   setUserActive,
   typingChanged,
   updateUserRole,
@@ -1450,6 +1451,33 @@ export async function createBridgeApp(
     broadcast(auditEvent);
 
     return { workspace: workspaceEvent.payload };
+  });
+
+  app.post("/admin/maintenance/retention-run", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const result = runRetentionSweep();
+    const auditEvent = appendAuditLog({
+      action: "maintenance.retention.run",
+      actorId: auth.actorId,
+      targetType: "workspace",
+      targetId: workspace.id,
+      summary: `Ran retention sweep and removed ${result.deletedCount} messages older than ${result.cutoffIso}`
+    });
+    broadcast(auditEvent);
+
+    return {
+      ok: true,
+      deletedCount: result.deletedCount,
+      cutoffIso: result.cutoffIso
+    };
   });
 
   app.delete("/admin/messages/:messageId", async (request, reply) => {

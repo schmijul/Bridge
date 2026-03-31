@@ -51,6 +51,14 @@ function makeInitialUsers(now: string): User[] {
       role: "member",
       isActive: true,
       lastSeenAt: now
+    },
+    {
+      id: "u-4",
+      displayName: "Jordan",
+      email: "jordan@bridge.local",
+      role: "member",
+      isActive: true,
+      lastSeenAt: now
     }
   ];
 }
@@ -85,22 +93,173 @@ function makeInitialChannels(): Channel[] {
 }
 
 function makeInitialMessages(now: string): Message[] {
+  const base = new Date(now).getTime();
+  const ago = (minutes: number) => new Date(base - minutes * 60_000).toISOString();
+
   return [
+    // --- #general ---
     {
       id: "m-1",
       channelId: "c-general",
       senderId: "u-1",
-      content: "Welcome to Bridge. Please use threads for decisions.",
-      createdAt: now,
+      content: "Welcome to Bridge! This is our new team workspace. Please keep announcements here and use threads for longer discussions.",
+      createdAt: ago(240),
       mentionUserIds: []
     },
     {
       id: "m-2",
+      channelId: "c-general",
+      senderId: "u-2",
+      content: "Looks great @Alex! I've set up the product and support channels already. Everyone should join the ones relevant to their work.",
+      createdAt: ago(235),
+      mentionUserIds: ["u-1"]
+    },
+    {
+      id: "m-3",
+      channelId: "c-general",
+      senderId: "u-3",
+      content: "Just joined, this is so much better than email threads. Love the clean UI.",
+      createdAt: ago(220),
+      mentionUserIds: []
+    },
+    {
+      id: "m-4",
+      channelId: "c-general",
+      senderId: "u-1",
+      content: "Quick reminder: all-hands meeting tomorrow at 10am. @Sam will present the Q2 roadmap and @Nina has the support metrics.",
+      createdAt: ago(90),
+      mentionUserIds: ["u-2", "u-3"]
+    },
+    // thread reply on m-4
+    {
+      id: "m-5",
+      channelId: "c-general",
+      senderId: "u-2",
+      content: "Slides are ready, I'll share the deck 30 minutes before.",
+      createdAt: ago(85),
+      threadRootMessageId: "m-4",
+      mentionUserIds: []
+    },
+    {
+      id: "m-6",
+      channelId: "c-general",
+      senderId: "u-3",
+      content: "Support metrics are looking good this quarter. Down 18% on response time!",
+      createdAt: ago(80),
+      threadRootMessageId: "m-4",
+      mentionUserIds: []
+    },
+    {
+      id: "m-7",
+      channelId: "c-general",
+      senderId: "u-4",
+      content: "Hey everyone! Just onboarded today, excited to be here. I'll be working on the frontend for the next sprint.",
+      createdAt: ago(45),
+      mentionUserIds: []
+    },
+    // --- #product ---
+    {
+      id: "m-8",
       channelId: "c-product",
       senderId: "u-2",
-      content: "Release freeze on Friday at 14:00.",
-      createdAt: now,
+      content: "Release freeze is on Friday at 14:00. All PRs need to be merged by Thursday EOD. No exceptions this time.",
+      createdAt: ago(180),
       mentionUserIds: []
+    },
+    {
+      id: "m-9",
+      channelId: "c-product",
+      senderId: "u-1",
+      content: "The file upload feature is now in staging. @Jordan can you run the acceptance tests before we cut the release?",
+      createdAt: ago(120),
+      mentionUserIds: ["u-4"]
+    },
+    // thread on m-9
+    {
+      id: "m-10",
+      channelId: "c-product",
+      senderId: "u-4",
+      content: "On it! I'll have results by end of day. Running the full suite now.",
+      createdAt: ago(115),
+      threadRootMessageId: "m-9",
+      mentionUserIds: []
+    },
+    {
+      id: "m-11",
+      channelId: "c-product",
+      senderId: "u-4",
+      content: "All 47 tests passing. One flaky test on large file uploads but it passed on retry. Good to ship.",
+      createdAt: ago(60),
+      threadRootMessageId: "m-9",
+      mentionUserIds: []
+    },
+    {
+      id: "m-12",
+      channelId: "c-product",
+      senderId: "u-2",
+      content: "Sprint velocity is up 15% this iteration. Great work team. Let's keep the momentum going into Q2.",
+      createdAt: ago(30),
+      mentionUserIds: []
+    },
+    {
+      id: "m-13",
+      channelId: "c-product",
+      senderId: "u-3",
+      content: "Can we add a dark mode toggle to the backlog? Getting requests from a few customers.",
+      createdAt: ago(15),
+      mentionUserIds: []
+    },
+    // --- #support ---
+    {
+      id: "m-14",
+      channelId: "c-support",
+      senderId: "u-3",
+      content: "Heads up: we're seeing increased ticket volume from EU customers about the GDPR export flow. I've drafted a KB article.",
+      createdAt: ago(150),
+      mentionUserIds: []
+    },
+    {
+      id: "m-15",
+      channelId: "c-support",
+      senderId: "u-1",
+      content: "@Nina great catch. Can you share the article draft? I want to make sure it aligns with our privacy policy language.",
+      createdAt: ago(140),
+      mentionUserIds: ["u-3"]
+    },
+    // thread on m-15
+    {
+      id: "m-16",
+      channelId: "c-support",
+      senderId: "u-3",
+      content: "Shared in the docs folder. The main gap is around data portability timelines — I listed 30 days but legal says 15.",
+      createdAt: ago(135),
+      threadRootMessageId: "m-15",
+      mentionUserIds: []
+    },
+    {
+      id: "m-17",
+      channelId: "c-support",
+      senderId: "u-1",
+      content: "Let's go with 15 days to be safe. Update the article and I'll approve it.",
+      createdAt: ago(130),
+      threadRootMessageId: "m-15",
+      mentionUserIds: []
+    },
+    {
+      id: "m-18",
+      channelId: "c-support",
+      senderId: "u-4",
+      content: "Customer Acme Corp reported a login issue on Safari. I can reproduce it — looks like a cookie SameSite problem. Working on a fix.",
+      createdAt: ago(25),
+      mentionUserIds: []
+    },
+    {
+      id: "m-19",
+      channelId: "c-support",
+      senderId: "u-2",
+      content: "@Jordan keep me posted on that Safari fix. If it's a blocker we might need a hotfix before Friday.",
+      createdAt: ago(10),
+      mentionUserIds: ["u-4"]
     }
   ];
 }
@@ -150,6 +309,8 @@ function setInMemoryDefaults(now: string): void {
   auditLog.splice(0, auditLog.length, ...makeInitialAuditLog(now));
   presence.clear();
   presence.set("u-1", "online");
+  presence.set("u-2", "online");
+  presence.set("u-4", "away");
   readState.clear();
   channelMembership.clear();
   sequence = 0;
@@ -951,6 +1112,47 @@ export function updateWorkspaceSettings(patch: Partial<WorkspaceSettings>): Serv
   };
 }
 
+export function runRetentionSweep(nowIso = new Date().toISOString()): {
+  deletedCount: number;
+  cutoffIso: string;
+} {
+  const cutoffMs = new Date(nowIso).getTime() - workspace.settings.messageRetentionDays * 24 * 60 * 60 * 1000;
+  const cutoffIso = new Date(cutoffMs).toISOString();
+  const beforeCount = messages.length;
+  const deletedIds = new Set<string>();
+  const keptMessages: Message[] = [];
+
+  for (const message of messages) {
+    if (new Date(message.createdAt).getTime() < cutoffMs) {
+      deletedIds.add(message.id);
+    } else {
+      keptMessages.push(message);
+    }
+  }
+
+  if (deletedIds.size === 0) {
+    return { deletedCount: 0, cutoffIso };
+  }
+
+  messages.splice(0, messages.length, ...keptMessages);
+  for (const [key, state] of readState.entries()) {
+    if (deletedIds.has(state.lastMessageId)) {
+      readState.delete(key);
+    }
+  }
+
+  enqueuePersist(async () => {
+    const db = getDbPool();
+    await db.query("DELETE FROM messages WHERE created_at < $1", [cutoffIso]);
+    await db.query(
+      "DELETE FROM read_state WHERE last_message_id = ANY($1::text[])",
+      [Array.from(deletedIds)]
+    );
+  });
+
+  return { deletedCount: beforeCount - keptMessages.length, cutoffIso };
+}
+
 export function appendAuditLog(input: {
   action: string;
   actorId: string;
@@ -996,10 +1198,17 @@ export function appendAuditLog(input: {
 }
 
 export function getAdminOverview() {
+  const channelMembers = Object.fromEntries(
+    channels
+      .filter((channel) => channel.isPrivate && !channel.archivedAt)
+      .map((channel) => [channel.id, getChannelMemberIds(channel.id)])
+  );
+
   return {
     workspace,
     users,
     channels,
+    channelMembers,
     messages,
     auditLog,
     stats: {

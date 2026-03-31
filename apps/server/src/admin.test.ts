@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createBridgeApp } from "./app.js";
 import { initAuth } from "./auth.js";
-import { resetStore, users } from "./store.js";
+import { messages, resetStore, users, workspace } from "./store.js";
 
 async function makeApp() {
   resetStore();
@@ -541,4 +541,27 @@ test("metrics endpoint exposes auth and http counters", async (t) => {
   assert.match(metrics.body, /bridge_events_total\{event="auth\.local\.login_success"\}\s+[1-9]/);
   assert.match(metrics.body, /bridge_events_total\{event="auth\.local\.invalid_credentials"\}\s+[1-9]/);
   assert.match(metrics.body, /bridge_events_total\{event="http\.responses\.total"\}\s+[1-9]/);
+});
+
+test("admin retention maintenance removes expired messages", async (t) => {
+  const app = await makeApp();
+  t.after(async () => {
+    await app.close();
+  });
+
+  workspace.settings.messageRetentionDays = 7;
+  const oldMessage = messages.find((message) => message.id === "m-1");
+  assert.ok(oldMessage);
+  oldMessage.createdAt = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+
+  const sessionId = await loginAs(app, "alex@bridge.local", "bridge123!");
+  const run = await app.inject({
+    method: "POST",
+    url: "/admin/maintenance/retention-run",
+    cookies: { bridge_session: sessionId }
+  });
+
+  assert.equal(run.statusCode, 200);
+  assert.ok(run.json().deletedCount >= 1);
+  assert.equal(messages.some((message) => message.id === "m-1"), false);
 });

@@ -108,6 +108,7 @@ Admin endpoints are protected by role and require a valid session cookie.
 - `PATCH /admin/users/:userId/status`
 - `PATCH /admin/settings`
 - `PATCH /admin/settings` can update governance/security settings such as `allowGuestAccess` and `enforceMfaForAdmins`
+- `POST /admin/maintenance/retention-run` executes a retention sweep based on `messageRetentionDays`
 - `DELETE /admin/messages/:messageId`
 
 ## Auth API
