@@ -155,7 +155,9 @@ Default local dev credentials:
 Implemented:
 
 - Session login/logout (`/auth/*`) with cookie-based auth
+- Auth mode switch (`AUTH_MODE=local|oidc`) with OIDC login route (`POST /auth/oidc/login`)
 - Admin board role checks and moderation flows
+- Admin audit export with filtering/pagination (`GET /admin/audit/export?...`)
 - Channel membership/ACL controls for private channels
 - Direct messages and group direct message conversations
 - Threads/replies with `threadRootMessageId` metadata
@@ -166,6 +168,17 @@ Implemented:
 - Database migrations (`001_init.sql`, `002_auth.sql`, `003_channel_acl.sql`, `004_direct_messages.sql`, `005_threads_mentions.sql`)
 - Realtime WebSocket sync with authenticated user binding
 - Basic server-side message search endpoint
+- Readiness endpoint with store/Redis dependency checks (`GET /ready`)
+- Prometheus-compatible metrics endpoint (`GET /metrics`)
+- Manual retention maintenance endpoint with audit trail (`POST /admin/maintenance/retention-run`)
+
+### Recently Delivered (2026-03-31)
+
+- OIDC mode wiring (`/auth/mode`, `/auth/oidc/login`) plus security/session hardening updates
+- `/ready` now reports real store + Redis health instead of Redis placeholder status
+- Audit export now supports JSON/CSV plus filters (`action`, `actorId`, `since`, `until`) and pagination (`offset`, `limit`)
+- `/metrics` added with in-process HTTP/auth/rate-limit counters
+- Retention sweep operation added for admin maintenance
 
 ## Open Work
 
@@ -174,7 +187,7 @@ Still required for production replacement:
 - Attachments (S3/MinIO), upload limits, and malware scanning strategy
 - Better search (indexing quality, ranking, pagination, retention awareness)
 - Redis-backed presence/pub-sub for reliable multi-instance scaling
-- Observability stack (metrics, tracing/log correlation, alerting)
+- Observability expansion beyond counters (`/metrics` exists): tracing, log correlation, dashboards, alert routing
 - Backup/restore automation with restore verification in CI/staging
 - Mattermost migration tooling (users/channels and optional history)
 - Desktop/mobile clients (Phase 2) and notification strategy
