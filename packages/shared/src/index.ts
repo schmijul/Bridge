@@ -29,6 +29,22 @@ export interface Message {
   createdAt: string;
   threadRootMessageId?: string;
   mentionUserIds?: string[];
+  attachments?: Attachment[];
+}
+
+export type AttachmentStatus = "pending" | "ready" | "rejected";
+
+export interface Attachment {
+  id: string;
+  messageId?: string;
+  channelId: string;
+  uploaderId: string;
+  threadRootMessageId?: string;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+  status: AttachmentStatus;
+  createdAt: string;
 }
 
 export interface ReadState {
@@ -57,7 +73,7 @@ export interface AuditLogEntry {
   id: string;
   action: string;
   actorId: string;
-  targetType: "channel" | "user" | "message" | "workspace";
+  targetType: "channel" | "user" | "message" | "workspace" | "attachment";
   targetId: string;
   summary: string;
   createdAt: string;
@@ -71,6 +87,7 @@ export type ClientEvent =
         content: string;
         tempId: string;
         threadRootMessageId?: string;
+        attachmentIds?: string[];
       };
     }
   | {

@@ -90,6 +90,11 @@ The Admin Board includes workspace governance and security controls (for example
 - `SESSION_COOKIE_SAMESITE` supports `lax` (default), `strict`, or `none`
 - `SESSION_COOKIE_DOMAIN` can scope cookies to your production domain
 - `TRUST_PROXY_HEADERS=true` enables `x-forwarded-for` client IP extraction behind trusted proxies
+- `ATTACHMENT_STORAGE_DRIVER` supports `local` (default) or `s3`
+- `ATTACHMENT_LOCAL_DIR` sets local upload directory for `local` driver
+- `ATTACHMENT_MAX_SIZE_BYTES` sets max upload size in bytes
+- `ATTACHMENT_BLOCKED_EXTENSIONS` overrides blocked executable/script extensions
+- For `ATTACHMENT_STORAGE_DRIVER=s3`, configure `ATTACHMENT_S3_BUCKET`, `ATTACHMENT_S3_REGION`, optional `ATTACHMENT_S3_ENDPOINT`, `ATTACHMENT_S3_KEY_PREFIX`, `ATTACHMENT_S3_FORCE_PATH_STYLE`, `ATTACHMENT_S3_ACCESS_KEY_ID`, and `ATTACHMENT_S3_SECRET_ACCESS_KEY`
 - In `AUTH_MODE=oidc`, configure identity headers with `OIDC_EMAIL_HEADER`, `OIDC_DISPLAY_NAME_HEADER`, and `OIDC_GROUPS_HEADER`
 - Optional OIDC group-to-role mapping via `OIDC_ROLE_GROUP_ADMIN`, `OIDC_ROLE_GROUP_MANAGER`, `OIDC_ROLE_GROUP_MEMBER`, `OIDC_ROLE_GROUP_GUEST`
 
@@ -131,6 +136,12 @@ Admin endpoints are protected by role and require a valid session cookie.
 
 - `GET /search/messages?q=<term>&limit=20` (session required)
 
+## Attachments API
+
+- `POST /attachments` multipart upload (`file`, `channelId`, optional `threadRootMessageId`)
+- `DELETE /attachments/:attachmentId` removes pending upload (owner-only)
+- `GET /attachments/:attachmentId/download` downloads a linked attachment with ACL checks
+
 ## Unread API
 
 - `GET /me/unread` (session required)
@@ -162,6 +173,7 @@ Implemented:
 - Direct messages and group direct message conversations
 - Threads/replies with `threadRootMessageId` metadata
 - Mentions metadata extraction on message send (`mentionUserIds`)
+- Attachment uploads with pending queue, message binding, ACL-protected download, and retention/moderation cleanup
 - Unread counters endpoint and server-side read-state tracking (`GET /me/unread`)
 - Auth/API boundary rate limiting and brute-force protections (`429` + `retry-after`)
 - Optional Postgres-backed persistence (`STORE_DRIVER=postgres`)
@@ -179,18 +191,25 @@ Implemented:
 - Audit export now supports JSON/CSV plus filters (`action`, `actorId`, `since`, `until`) and pagination (`offset`, `limit`)
 - `/metrics` added with in-process HTTP/auth/rate-limit counters
 - Retention sweep operation added for admin maintenance
+- Attachment v1 shipped:
+  - message attachments in shared contracts/bootstrap payloads
+  - upload endpoint with size and extension policy enforcement
+  - local and S3-compatible storage drivers
+  - attachment download endpoint with channel ACL checks
+  - pending upload removal endpoint
+  - attachment cleanup on moderation deletes and retention sweeps
 
 ## Open Work
 
 Still required for production replacement:
 
-- Attachments (S3/MinIO), upload limits, and malware scanning strategy
 - Better search (indexing quality, ranking, pagination, retention awareness)
 - Redis-backed presence/pub-sub for reliable multi-instance scaling
 - Observability expansion beyond counters (`/metrics` exists): tracing, log correlation, dashboards, alert routing
 - Backup/restore automation with restore verification in CI/staging
 - Mattermost migration tooling (users/channels and optional history)
 - Desktop/mobile clients (Phase 2) and notification strategy
+- Malware-scanning integration for attachments (current v1 has policy checks and storage drivers, but no AV scanner yet)
 
 ## Validation Pipeline
 

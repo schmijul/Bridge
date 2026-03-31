@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
+  Attachment,
+  AttachmentStatus,
   AuditLogEntry,
   Channel,
   Message,
@@ -15,6 +17,10 @@ import { getDbPool } from "./db.js";
 
 const workspaceId = "workspace-1";
 const persistenceEnabled = process.env.STORE_DRIVER === "postgres" && Boolean(process.env.DATABASE_URL);
+
+export type AttachmentRecord = Attachment & {
+  storageKey: string;
+};
 
 const initialWorkspace: Workspace = {
   id: workspaceId,
@@ -282,6 +288,7 @@ export const workspace: Workspace = structuredClone(initialWorkspace);
 export const users: User[] = [];
 export const channels: Channel[] = [];
 export const messages: Message[] = [];
+export const attachments: AttachmentRecord[] = [];
 export const auditLog: AuditLogEntry[] = [];
 
 const presence = new Map<string, PresenceState>();
@@ -306,6 +313,7 @@ function setInMemoryDefaults(now: string): void {
   users.splice(0, users.length, ...makeInitialUsers(now));
   channels.splice(0, channels.length, ...makeInitialChannels());
   messages.splice(0, messages.length, ...makeInitialMessages(now));
+  attachments.splice(0, attachments.length);
   auditLog.splice(0, auditLog.length, ...makeInitialAuditLog(now));
   presence.clear();
   presence.set("u-1", "online");
@@ -322,6 +330,7 @@ async function seedDatabaseFromMemory(): Promise<void> {
   try {
     await db.query("DELETE FROM read_state");
     await db.query("DELETE FROM presence_state");
+    await db.query("DELETE FROM attachments");
     await db.query("DELETE FROM messages");
     await db.query("DELETE FROM audit_log");
     await db.query("DELETE FROM channels");
@@ -389,6 +398,27 @@ async function seedDatabaseFromMemory(): Promise<void> {
           message.createdAt,
           message.threadRootMessageId ?? null,
           message.mentionUserIds ?? []
+        ]
+      );
+    }
+
+    for (const attachment of attachments) {
+      await db.query(
+        `INSERT INTO attachments
+          (id, message_id, channel_id, uploader_id, thread_root_message_id, storage_key, original_name, mime_type, size_bytes, status, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [
+          attachment.id,
+          attachment.messageId ?? null,
+          attachment.channelId,
+          attachment.uploaderId,
+          attachment.threadRootMessageId ?? null,
+          attachment.storageKey,
+          attachment.originalName,
+          attachment.mimeType,
+          attachment.sizeBytes,
+          attachment.status,
+          attachment.createdAt
         ]
       );
     }
@@ -523,9 +553,46 @@ async function loadStoreFromDatabase(): Promise<boolean> {
       content: row.content,
       createdAt: new Date(row.created_at).toISOString(),
       threadRootMessageId: row.thread_root_message_id ?? undefined,
-      mentionUserIds: row.mention_user_ids ?? []
+      mentionUserIds: row.mention_user_ids ?? [],
+      attachments: []
     }))
   );
+
+  const attachmentsResult = await db.query<{
+    id: string;
+    message_id: string | null;
+    channel_id: string;
+    uploader_id: string;
+    thread_root_message_id: string | null;
+    storage_key: string;
+    original_name: string;
+    mime_type: string;
+    size_bytes: number;
+    status: AttachmentStatus;
+    created_at: Date | string;
+  }>("SELECT * FROM attachments ORDER BY created_at ASC");
+  attachments.splice(
+    0,
+    attachments.length,
+    ...attachmentsResult.rows.map((row) => ({
+      id: row.id,
+      messageId: row.message_id ?? undefined,
+      channelId: row.channel_id,
+      uploaderId: row.uploader_id,
+      threadRootMessageId: row.thread_root_message_id ?? undefined,
+      storageKey: row.storage_key,
+      originalName: row.original_name,
+      mimeType: row.mime_type,
+      sizeBytes: row.size_bytes,
+      status: row.status,
+      createdAt: new Date(row.created_at).toISOString()
+    }))
+  );
+  for (const message of messages) {
+    message.attachments = attachments
+      .filter((attachment) => attachment.messageId === message.id && attachment.status === "ready")
+      .map(toPublicAttachment);
+  }
 
   const auditResult = await db.query<{
     id: string;
@@ -619,6 +686,27 @@ export function currentSequence(): number {
   return sequence;
 }
 
+function toPublicAttachment(attachment: AttachmentRecord): Attachment {
+  return {
+    id: attachment.id,
+    messageId: attachment.messageId,
+    channelId: attachment.channelId,
+    uploaderId: attachment.uploaderId,
+    threadRootMessageId: attachment.threadRootMessageId,
+    originalName: attachment.originalName,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes,
+    status: attachment.status,
+    createdAt: attachment.createdAt
+  };
+}
+
+function bindReadyAttachmentsForMessage(message: Message): void {
+  message.attachments = attachments
+    .filter((attachment) => attachment.messageId === message.id && attachment.status === "ready")
+    .map(toPublicAttachment);
+}
+
 export function getUserById(userId: string): User | undefined {
   return users.find((user) => user.id === userId);
 }
@@ -655,6 +743,72 @@ export function getChannelsForUser(userId: string): Channel[] {
 
 export function getMessagesForUser(userId: string): Message[] {
   return messages.filter((message) => isUserAllowedInChannel(userId, message.channelId));
+}
+
+export function getAttachmentById(attachmentId: string): AttachmentRecord | undefined {
+  return attachments.find((attachment) => attachment.id === attachmentId);
+}
+
+export function getAttachmentsForMessage(messageId: string): AttachmentRecord[] {
+  return attachments.filter((attachment) => attachment.messageId === messageId);
+}
+
+export function createPendingAttachment(input: {
+  channelId: string;
+  uploaderId: string;
+  threadRootMessageId?: string;
+  storageKey: string;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+}): AttachmentRecord {
+  const attachment: AttachmentRecord = {
+    id: randomUUID(),
+    channelId: input.channelId,
+    uploaderId: input.uploaderId,
+    threadRootMessageId: input.threadRootMessageId,
+    storageKey: input.storageKey,
+    originalName: input.originalName,
+    mimeType: input.mimeType,
+    sizeBytes: input.sizeBytes,
+    status: "pending",
+    createdAt: new Date().toISOString()
+  };
+  attachments.push(attachment);
+
+  enqueuePersist(async () => {
+    const db = getDbPool();
+    await db.query(
+      `INSERT INTO attachments
+        (id, message_id, channel_id, uploader_id, thread_root_message_id, storage_key, original_name, mime_type, size_bytes, status, created_at)
+       VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        attachment.id,
+        attachment.channelId,
+        attachment.uploaderId,
+        attachment.threadRootMessageId ?? null,
+        attachment.storageKey,
+        attachment.originalName,
+        attachment.mimeType,
+        attachment.sizeBytes,
+        attachment.status,
+        attachment.createdAt
+      ]
+    );
+  });
+
+  return attachment;
+}
+
+function removeAttachmentRecordsByMessageId(messageId: string): AttachmentRecord[] {
+  const removed = attachments.filter((attachment) => attachment.messageId === messageId);
+  if (removed.length === 0) {
+    return [];
+  }
+  const removedIds = new Set(removed.map((attachment) => attachment.id));
+  const kept = attachments.filter((attachment) => !removedIds.has(attachment.id));
+  attachments.splice(0, attachments.length, ...kept);
+  return removed;
 }
 
 export function getChannelMemberIds(channelId: string): string[] {
@@ -761,16 +915,48 @@ export function addMessage(
   channelId: string,
   senderId: string,
   content: string,
-  options?: { threadRootMessageId?: string; mentionUserIds?: string[] }
+  options?: { threadRootMessageId?: string; mentionUserIds?: string[]; attachmentIds?: string[] }
 ): ServerEvent {
+  const attachmentIds = options?.attachmentIds ?? [];
+  const messageId = randomUUID();
+  const claimedAttachments: AttachmentRecord[] = [];
+  for (const attachmentId of attachmentIds) {
+    const attachment = attachments.find((candidate) => candidate.id === attachmentId);
+    if (!attachment) {
+      throw new Error(`attachment not found: ${attachmentId}`);
+    }
+    if (attachment.uploaderId !== senderId) {
+      throw new Error(`attachment does not belong to sender: ${attachmentId}`);
+    }
+    if (attachment.channelId !== channelId) {
+      throw new Error(`attachment channel mismatch: ${attachmentId}`);
+    }
+    if ((attachment.threadRootMessageId ?? undefined) !== (options?.threadRootMessageId ?? undefined)) {
+      throw new Error(`attachment thread mismatch: ${attachmentId}`);
+    }
+    if (attachment.status !== "pending") {
+      throw new Error(`attachment is not pending: ${attachmentId}`);
+    }
+    if (attachment.messageId) {
+      throw new Error(`attachment already linked: ${attachmentId}`);
+    }
+    claimedAttachments.push(attachment);
+  }
+
+  for (const attachment of claimedAttachments) {
+    attachment.messageId = messageId;
+    attachment.status = "ready";
+  }
+
   const message: Message = {
-    id: randomUUID(),
+    id: messageId,
     channelId,
     senderId,
     content,
     createdAt: new Date().toISOString(),
     threadRootMessageId: options?.threadRootMessageId,
-    mentionUserIds: options?.mentionUserIds ?? []
+    mentionUserIds: options?.mentionUserIds ?? [],
+    attachments: claimedAttachments.map(toPublicAttachment)
   };
   messages.push(message);
   readState.set(`${senderId}:${channelId}`, {
@@ -795,6 +981,14 @@ export function addMessage(
         message.mentionUserIds ?? []
       ]
     );
+    if (claimedAttachments.length > 0) {
+      await db.query(
+        `UPDATE attachments
+         SET message_id = $2, status = 'ready'
+         WHERE id = ANY($1::text[])`,
+        [claimedAttachments.map((attachment) => attachment.id), message.id]
+      );
+    }
     await db.query(
       `INSERT INTO read_state (user_id, channel_id, last_message_id)
        VALUES ($1, $2, $3)
@@ -816,6 +1010,7 @@ export function deleteMessage(messageId: string): ServerEvent | null {
     return null;
   }
   const [removedMessage] = messages.splice(index, 1);
+  removeAttachmentRecordsByMessageId(messageId);
 
   enqueuePersist(async () => {
     const db = getDbPool();
@@ -826,6 +1021,46 @@ export function deleteMessage(messageId: string): ServerEvent | null {
     type: "message:deleted",
     payload: { messageId, channelId: removedMessage.channelId, sequence: nextSequenceInternal() }
   };
+}
+
+export function unlinkPendingAttachment(
+  attachmentId: string,
+  actorId: string
+): { ok: true; attachment: AttachmentRecord } | { ok: false; reason: "not_found" | "forbidden" | "already_linked" } {
+  const attachment = attachments.find((candidate) => candidate.id === attachmentId);
+  if (!attachment) {
+    return { ok: false, reason: "not_found" };
+  }
+  if (attachment.uploaderId !== actorId) {
+    return { ok: false, reason: "forbidden" };
+  }
+  if (attachment.messageId || attachment.status !== "pending") {
+    return { ok: false, reason: "already_linked" };
+  }
+
+  const index = attachments.findIndex((candidate) => candidate.id === attachmentId);
+  if (index >= 0) {
+    attachments.splice(index, 1);
+  }
+  enqueuePersist(async () => {
+    const db = getDbPool();
+    await db.query("DELETE FROM attachments WHERE id = $1", [attachmentId]);
+  });
+  return { ok: true, attachment };
+}
+
+export function getPendingAttachmentForActor(
+  attachmentId: string,
+  actorId: string
+): AttachmentRecord | null {
+  const attachment = attachments.find((candidate) => candidate.id === attachmentId);
+  if (!attachment) {
+    return null;
+  }
+  if (attachment.uploaderId !== actorId || attachment.status !== "pending" || attachment.messageId) {
+    return null;
+  }
+  return attachment;
 }
 
 export function setReadState(userId: string, channelId: string, lastMessageId: string): ServerEvent {
@@ -1114,6 +1349,8 @@ export function updateWorkspaceSettings(patch: Partial<WorkspaceSettings>): Serv
 
 export function runRetentionSweep(nowIso = new Date().toISOString()): {
   deletedCount: number;
+  deletedAttachmentCount: number;
+  deletedAttachments: AttachmentRecord[];
   cutoffIso: string;
 } {
   const cutoffMs = new Date(nowIso).getTime() - workspace.settings.messageRetentionDays * 24 * 60 * 60 * 1000;
@@ -1131,10 +1368,17 @@ export function runRetentionSweep(nowIso = new Date().toISOString()): {
   }
 
   if (deletedIds.size === 0) {
-    return { deletedCount: 0, cutoffIso };
+    return { deletedCount: 0, deletedAttachmentCount: 0, deletedAttachments: [], cutoffIso };
   }
 
+  const deletedAttachments = attachments.filter((attachment) =>
+    attachment.messageId ? deletedIds.has(attachment.messageId) : false
+  );
+  const deletedAttachmentIdSet = new Set(deletedAttachments.map((attachment) => attachment.id));
+  const keptAttachments = attachments.filter((attachment) => !deletedAttachmentIdSet.has(attachment.id));
+
   messages.splice(0, messages.length, ...keptMessages);
+  attachments.splice(0, attachments.length, ...keptAttachments);
   for (const [key, state] of readState.entries()) {
     if (deletedIds.has(state.lastMessageId)) {
       readState.delete(key);
@@ -1150,7 +1394,12 @@ export function runRetentionSweep(nowIso = new Date().toISOString()): {
     );
   });
 
-  return { deletedCount: beforeCount - keptMessages.length, cutoffIso };
+  return {
+    deletedCount: beforeCount - keptMessages.length,
+    deletedAttachmentCount: deletedAttachments.length,
+    deletedAttachments,
+    cutoffIso
+  };
 }
 
 export function appendAuditLog(input: {

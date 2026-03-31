@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
+import multipart from "@fastify/multipart";
 import { WebSocketServer, type WebSocket } from "ws";
 import net from "node:net";
 import { readFileSync } from "node:fs";
@@ -13,12 +14,15 @@ import {
   addMessage,
   appendAuditLog,
   archiveChannel,
+  createPendingAttachment,
   addChannelMember,
   channels,
   createChannel,
   createDirectConversation,
   currentSequence,
   deleteMessage,
+  getAttachmentById,
+  getAttachmentsForMessage,
   getChannelMemberIds,
   getChannelsForUser,
   getDirectConversationsForUser,
@@ -36,6 +40,7 @@ import {
   removeChannelMember,
   setPresence,
   setReadState,
+  unlinkPendingAttachment,
   runRetentionSweep,
   setUserActive,
   typingChanged,
@@ -44,6 +49,14 @@ import {
   users,
   workspace
 } from "./store.js";
+import {
+  createAttachmentStorage,
+  fileExtension,
+  parseAttachmentStorageConfig,
+  parseBlockedExtensions,
+  readStreamToBuffer,
+  safeFilename
+} from "./attachments.js";
 import {
   createSession,
   deleteSession,
@@ -57,9 +70,10 @@ const messageSendSchema = z.object({
   type: z.literal("message:send"),
   payload: z.object({
     channelId: z.string().min(1),
-    content: z.string().min(1).max(4000),
+    content: z.string().max(4000),
     tempId: z.string().min(1),
-    threadRootMessageId: z.string().min(1).optional()
+    threadRootMessageId: z.string().min(1).optional(),
+    attachmentIds: z.array(z.string().uuid()).max(8).optional()
   })
 });
 
@@ -430,6 +444,35 @@ function extractMentionUserIds(content: string): string[] {
   return [...result];
 }
 
+function inferMimeType(fallback: string | undefined, filename: string): string {
+  const normalized = (fallback ?? "").trim().toLowerCase();
+  if (normalized.length > 0 && normalized !== "application/octet-stream") {
+    return normalized;
+  }
+  const extension = fileExtension(filename);
+  if (extension === "png") return "image/png";
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  if (extension === "gif") return "image/gif";
+  if (extension === "webp") return "image/webp";
+  if (extension === "svg") return "image/svg+xml";
+  if (extension === "pdf") return "application/pdf";
+  if (extension === "txt" || extension === "md") return "text/plain";
+  if (extension === "json") return "application/json";
+  return "application/octet-stream";
+}
+
+function getMultipartFieldValue(field: unknown): string | undefined {
+  if (!field) {
+    return undefined;
+  }
+  const single = Array.isArray(field) ? field[0] : field;
+  if (!single || typeof single !== "object" || !("value" in single)) {
+    return undefined;
+  }
+  const value = (single as { value?: unknown }).value;
+  return typeof value === "string" ? value : undefined;
+}
+
 async function resolveActorId(request: FastifyRequest): Promise<string | null> {
   const sessionId = sessionIdFromCookie(request.headers.cookie);
   const userIdFromSession = await getUserIdFromSession(sessionId);
@@ -537,6 +580,9 @@ export async function createBridgeApp(
     member: parseGroupSet(options?.auth?.roleGroups?.member ?? process.env.OIDC_ROLE_GROUP_MEMBER),
     guest: parseGroupSet(options?.auth?.roleGroups?.guest ?? process.env.OIDC_ROLE_GROUP_GUEST)
   };
+  const attachmentStorage = createAttachmentStorage(parseAttachmentStorageConfig(process.env));
+  const attachmentMaxBytes = envNumber("ATTACHMENT_MAX_SIZE_BYTES", 25 * 1024 * 1024);
+  const blockedAttachmentExtensions = parseBlockedExtensions(process.env.ATTACHMENT_BLOCKED_EXTENSIONS);
   const corsAllowList = parseCorsOrigins(corsOrigin);
   const corsOriginMatcher =
     corsAllowList.length <= 1
@@ -552,6 +598,7 @@ export async function createBridgeApp(
   const app = Fastify({ logger: { level: "info" } });
   await app.register(cors, { origin: corsOriginMatcher, credentials: true });
   await app.register(cookie);
+  await app.register(multipart);
   app.addHook("onSend", async (_request, reply, payload) => {
     reply.header("x-content-type-options", "nosniff");
     reply.header("x-frame-options", "DENY");
@@ -724,6 +771,151 @@ export async function createBridgeApp(
       workspace,
       cursor: { sequence: currentSequence() }
     };
+  });
+
+  app.post("/attachments", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const filePart = await request.file();
+    if (!filePart) {
+      return reply.code(400).send({ message: "multipart file payload required" });
+    }
+
+    const channelId = (getMultipartFieldValue(filePart.fields.channelId) ?? "").trim();
+    if (!channelId) {
+      return reply.code(400).send({ message: "channelId field is required" });
+    }
+    if (!isUserAllowedInChannel(auth.actorId, channelId)) {
+      return reply.code(403).send({ message: "forbidden channel access" });
+    }
+
+    const threadRootRaw = (getMultipartFieldValue(filePart.fields.threadRootMessageId) ?? "").trim();
+    const threadRootMessageId = threadRootRaw.length > 0 ? threadRootRaw : undefined;
+    if (threadRootMessageId) {
+      const root = messages.find((message) => message.id === threadRootMessageId);
+      if (!root || root.channelId !== channelId) {
+        return reply.code(400).send({ message: "thread root message not found in channel" });
+      }
+    }
+
+    const originalName = safeFilename(filePart.filename || "file");
+    const extension = fileExtension(originalName);
+    if (extension && blockedAttachmentExtensions.has(extension)) {
+      return reply.code(400).send({ message: "file extension blocked by policy" });
+    }
+
+    const bytes = await readStreamToBuffer(filePart.file);
+    if (bytes.length === 0) {
+      return reply.code(400).send({ message: "empty upload is not allowed" });
+    }
+    if (bytes.length > attachmentMaxBytes) {
+      return reply.code(413).send({ message: `attachment exceeds max size of ${attachmentMaxBytes} bytes` });
+    }
+
+    const mimeType = inferMimeType(filePart.mimetype, originalName);
+    const stored = await attachmentStorage.upload({ bytes, mimeType, originalName });
+    const attachment = createPendingAttachment({
+      channelId,
+      uploaderId: auth.actorId,
+      threadRootMessageId,
+      storageKey: stored.storageKey,
+      originalName,
+      mimeType,
+      sizeBytes: stored.sizeBytes
+    });
+    const auditEvent = appendAuditLog({
+      action: "attachment.uploaded",
+      actorId: auth.actorId,
+      targetType: "attachment",
+      targetId: attachment.id,
+      summary: `Uploaded attachment ${attachment.originalName} (${attachment.sizeBytes} bytes)`
+    });
+    broadcast(auditEvent);
+
+    return reply.code(201).send({
+      attachment: {
+        id: attachment.id,
+        messageId: attachment.messageId,
+        channelId: attachment.channelId,
+        uploaderId: attachment.uploaderId,
+        threadRootMessageId: attachment.threadRootMessageId,
+        originalName: attachment.originalName,
+        mimeType: attachment.mimeType,
+        sizeBytes: attachment.sizeBytes,
+        status: attachment.status,
+        createdAt: attachment.createdAt
+      }
+    });
+  });
+
+  app.delete("/attachments/:attachmentId", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+    const attachmentId = z.string().uuid().parse((request.params as { attachmentId: string }).attachmentId);
+    const unlinked = unlinkPendingAttachment(attachmentId, auth.actorId);
+    if (!unlinked.ok) {
+      if (unlinked.reason === "not_found") {
+        return reply.code(404).send({ message: "attachment not found" });
+      }
+      if (unlinked.reason === "forbidden") {
+        return reply.code(403).send({ message: "forbidden attachment access" });
+      }
+      return reply.code(409).send({ message: "attachment already linked to a message" });
+    }
+
+    await attachmentStorage.removeByKey(unlinked.attachment.storageKey);
+    const auditEvent = appendAuditLog({
+      action: "attachment.removed",
+      actorId: auth.actorId,
+      targetType: "attachment",
+      targetId: unlinked.attachment.id,
+      summary: `Removed pending attachment ${unlinked.attachment.originalName}`
+    });
+    broadcast(auditEvent);
+    return { ok: true };
+  });
+
+  app.get("/attachments/:attachmentId/download", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const attachmentId = z.string().uuid().parse((request.params as { attachmentId: string }).attachmentId);
+    const attachment = getAttachmentById(attachmentId);
+    if (!attachment || !attachment.messageId || attachment.status !== "ready") {
+      return reply.code(404).send({ message: "attachment not found" });
+    }
+    if (!isUserAllowedInChannel(auth.actorId, attachment.channelId)) {
+      return reply.code(403).send({ message: "forbidden attachment access" });
+    }
+    const stored = await attachmentStorage.readByKey(attachment.storageKey);
+    reply.header("content-type", stored.mimeType ?? attachment.mimeType);
+    reply.header(
+      "content-disposition",
+      `attachment; filename="${attachment.originalName.replace(/"/g, "_")}"`
+    );
+    if (stored.sizeBytes) {
+      reply.header("content-length", String(stored.sizeBytes));
+    }
+    return reply.send(stored.stream);
   });
 
   app.post("/auth/login", async (request, reply) => {
@@ -1464,18 +1656,24 @@ export async function createBridgeApp(
     }
 
     const result = runRetentionSweep();
+    await Promise.all(
+      result.deletedAttachments.map((attachment) =>
+        attachmentStorage.removeByKey(attachment.storageKey).catch(() => undefined)
+      )
+    );
     const auditEvent = appendAuditLog({
       action: "maintenance.retention.run",
       actorId: auth.actorId,
       targetType: "workspace",
       targetId: workspace.id,
-      summary: `Ran retention sweep and removed ${result.deletedCount} messages older than ${result.cutoffIso}`
+      summary: `Ran retention sweep and removed ${result.deletedCount} messages and ${result.deletedAttachmentCount} attachments older than ${result.cutoffIso}`
     });
     broadcast(auditEvent);
 
     return {
       ok: true,
       deletedCount: result.deletedCount,
+      deletedAttachmentCount: result.deletedAttachmentCount,
       cutoffIso: result.cutoffIso
     };
   });
@@ -1491,10 +1689,16 @@ export async function createBridgeApp(
     }
 
     const messageId = z.string().parse((request.params as { messageId: string }).messageId);
+    const messageAttachments = getAttachmentsForMessage(messageId);
     const messageEvent = deleteMessage(messageId);
     if (!messageEvent) {
       return reply.code(404).send({ message: "message not found" });
     }
+    await Promise.all(
+      messageAttachments.map((attachment) =>
+        attachmentStorage.removeByKey(attachment.storageKey).catch(() => undefined)
+      )
+    );
 
     const auditEvent = appendAuditLog({
       action: "message.deleted",
@@ -1561,11 +1765,12 @@ export async function createBridgeApp(
           const event: ClientEvent = parsed.data;
           if (event.type === "message:send") {
             const content = event.payload.content.trim();
-            if (!content) {
+            const attachmentIds = event.payload.attachmentIds ?? [];
+            if (!content && attachmentIds.length === 0) {
               socket.send(
                 JSON.stringify({
                   type: "error",
-                  payload: { message: "message content cannot be empty" }
+                  payload: { message: "message must contain text or at least one attachment" }
                 } satisfies ServerEvent)
               );
               return;
@@ -1605,9 +1810,61 @@ export async function createBridgeApp(
               }
             }
 
+            if (attachmentIds.length > 0) {
+              for (const attachmentId of attachmentIds) {
+                const attachment = getAttachmentById(attachmentId);
+                if (!attachment) {
+                  socket.send(
+                    JSON.stringify({
+                      type: "error",
+                      payload: { message: "attachment not found" }
+                    } satisfies ServerEvent)
+                  );
+                  return;
+                }
+                if (attachment.uploaderId !== actorId) {
+                  socket.send(
+                    JSON.stringify({
+                      type: "error",
+                      payload: { message: "attachment ownership mismatch" }
+                    } satisfies ServerEvent)
+                  );
+                  return;
+                }
+                if (attachment.channelId !== event.payload.channelId) {
+                  socket.send(
+                    JSON.stringify({
+                      type: "error",
+                      payload: { message: "attachment channel mismatch" }
+                    } satisfies ServerEvent)
+                  );
+                  return;
+                }
+                if ((attachment.threadRootMessageId ?? undefined) !== (event.payload.threadRootMessageId ?? undefined)) {
+                  socket.send(
+                    JSON.stringify({
+                      type: "error",
+                      payload: { message: "attachment thread mismatch" }
+                    } satisfies ServerEvent)
+                  );
+                  return;
+                }
+                if (attachment.status !== "pending" || attachment.messageId) {
+                  socket.send(
+                    JSON.stringify({
+                      type: "error",
+                      payload: { message: "attachment already linked" }
+                    } satisfies ServerEvent)
+                  );
+                  return;
+                }
+              }
+            }
+
             const serverEvent = addMessage(event.payload.channelId, actorId, content, {
               threadRootMessageId: event.payload.threadRootMessageId,
-              mentionUserIds: extractMentionUserIds(content)
+              mentionUserIds: extractMentionUserIds(content),
+              attachmentIds
             });
             broadcast(serverEvent);
           }
