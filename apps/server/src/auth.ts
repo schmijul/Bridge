@@ -12,7 +12,8 @@ const sessionById = new Map<string, { userId: string; expiresAt: string }>();
 const devDefaultPasswords: Record<string, string> = {
   "u-1": "bridge123!",
   "u-2": "bridge123!",
-  "u-3": "bridge123!"
+  "u-3": "bridge123!",
+  "u-4": "bridge123!"
 };
 
 async function persistSession(
@@ -157,4 +158,17 @@ export async function deleteSession(sessionId: string | undefined): Promise<void
   }
   const db = getDbPool();
   await db.query("DELETE FROM sessions WHERE id = $1", [sessionId]);
+}
+
+export async function deleteSessionsForUser(userId: string): Promise<void> {
+  for (const [sessionId, session] of sessionById.entries()) {
+    if (session.userId === userId) {
+      sessionById.delete(sessionId);
+    }
+  }
+  if (!persistenceEnabled) {
+    return;
+  }
+  const db = getDbPool();
+  await db.query("DELETE FROM sessions WHERE user_id = $1", [userId]);
 }

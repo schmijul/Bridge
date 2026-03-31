@@ -2,6 +2,14 @@
 
 Bridge is a privacy-first team messaging platform with real-time sync, workspace governance controls, and an integrated admin board.
 
+## Project Status & Disclaimer
+
+Bridge is a self-teaching side project and community playground, not a finished enterprise product.
+
+- This repository is provided as-is for learning and experimentation.
+- No warranty is provided, including for security vulnerabilities, data loss, or fitness for production use.
+- Do not deploy this code in production environments without your own full security review, hardening, and operational controls.
+
 ## Screenshots
 
 Screenshots below were refreshed for the current session-based login flow.
@@ -17,6 +25,8 @@ Screenshots below were refreshed for the current session-based login flow.
 ### Admin Board
 
 ![Bridge Admin Board](imgs/admin-board.png)
+
+The Admin Board includes workspace governance and security controls (for example guest access and MFA enforcement policy toggles).
 
 ## Stack
 
@@ -74,6 +84,10 @@ Screenshots below were refreshed for the current session-based login flow.
 - `AUTH_LOGIN_RATE_LIMIT_MAX` and `AUTH_LOGIN_RATE_LIMIT_WINDOW_MS` tune login burst throttling
 - `AUTH_LOGIN_FAILURE_LIMIT_MAX` and `AUTH_LOGIN_FAILURE_LIMIT_WINDOW_MS` tune login brute-force lockout
 - `API_RATE_LIMIT_MAX` and `API_RATE_LIMIT_WINDOW_MS` tune authenticated API throttling
+- `SESSION_COOKIE_SECURE=true` should be enabled behind HTTPS in production
+- `SESSION_COOKIE_SAMESITE` supports `lax` (default), `strict`, or `none`
+- `SESSION_COOKIE_DOMAIN` can scope cookies to your production domain
+- `TRUST_PROXY_HEADERS=true` enables `x-forwarded-for` client IP extraction behind trusted proxies
 
 ## Admin API
 
@@ -88,6 +102,7 @@ Admin endpoints are protected by role and require a valid session cookie.
 - `PATCH /admin/users/:userId/role`
 - `PATCH /admin/users/:userId/status`
 - `PATCH /admin/settings`
+- `PATCH /admin/settings` can update governance/security settings such as `allowGuestAccess` and `enforceMfaForAdmins`
 - `DELETE /admin/messages/:messageId`
 
 ## Auth API

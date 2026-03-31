@@ -43,6 +43,7 @@ import {
 import {
   createSession,
   deleteSession,
+  deleteSessionsForUser,
   getUserIdFromSession,
   setPassword,
   verifyPassword
@@ -192,12 +193,89 @@ function envNumber(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function getClientAddress(request: FastifyRequest): string {
-  const forwarded = request.headers["x-forwarded-for"];
-  if (typeof forwarded === "string" && forwarded.trim().length > 0) {
-    return forwarded.split(",")[0]!.trim();
+function envBoolean(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (!raw) {
+    return fallback;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
+function normalizeSameSite(raw: string | undefined): "lax" | "strict" | "none" {
+  const normalized = (raw ?? "").trim().toLowerCase();
+  if (normalized === "strict" || normalized === "none") {
+    return normalized;
+  }
+  return "lax";
+}
+
+function parseCorsOrigins(corsOrigin: string): string[] {
+  return corsOrigin
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function getClientAddress(request: FastifyRequest, trustProxyHeaders: boolean): string {
+  if (trustProxyHeaders) {
+    const forwarded = request.headers["x-forwarded-for"];
+    if (typeof forwarded === "string" && forwarded.trim().length > 0) {
+      return forwarded.split(",")[0]!.trim();
+    }
   }
   return request.ip;
+}
+
+function getSecurityHeaderValue(enabled: boolean): string | undefined {
+  return enabled ? "max-age=31536000; includeSubDomains" : undefined;
+}
+
+function sessionCookieConfig(
+  secure: boolean,
+  sameSite: "lax" | "strict" | "none",
+  domain: string | undefined,
+  expiresAt: string
+): {
+  httpOnly: true;
+  sameSite: "lax" | "strict" | "none";
+  path: "/";
+  secure: boolean;
+  expires: Date;
+  domain?: string;
+} {
+  return {
+    httpOnly: true,
+    sameSite,
+    path: "/",
+    secure,
+    expires: new Date(expiresAt),
+    ...(domain ? { domain } : {})
+  };
+}
+
+function clearSessionCookieConfig(
+  secure: boolean,
+  sameSite: "lax" | "strict" | "none",
+  domain: string | undefined
+): {
+  path: "/";
+  secure: boolean;
+  sameSite: "lax" | "strict" | "none";
+  domain?: string;
+} {
+  return {
+    path: "/",
+    secure,
+    sameSite,
+    ...(domain ? { domain } : {})
+  };
 }
 
 function sessionIdFromCookie(cookieHeader: unknown): string | undefined {
@@ -284,14 +362,53 @@ export async function createBridgeApp(
       apiMax?: number;
       apiWindowMs?: number;
     };
+    security?: {
+      trustProxyHeaders?: boolean;
+      sessionCookieSecure?: boolean;
+      sessionCookieSameSite?: "lax" | "strict" | "none";
+      sessionCookieDomain?: string;
+    };
   }
 ): Promise<{
   app: FastifyInstance;
   attachRealtime: () => void;
 }> {
+  const trustProxyHeaders =
+    options?.security?.trustProxyHeaders ?? envBoolean("TRUST_PROXY_HEADERS", false);
+  const sessionCookieSecure =
+    options?.security?.sessionCookieSecure ?? envBoolean("SESSION_COOKIE_SECURE", false);
+  const sessionCookieSameSite =
+    options?.security?.sessionCookieSameSite ??
+    normalizeSameSite(process.env.SESSION_COOKIE_SAMESITE);
+  const sessionCookieDomain =
+    options?.security?.sessionCookieDomain ?? process.env.SESSION_COOKIE_DOMAIN;
+  const corsAllowList = parseCorsOrigins(corsOrigin);
+  const corsOriginMatcher =
+    corsAllowList.length <= 1
+      ? corsAllowList[0] ?? false
+      : (origin: string | undefined, cb: (err: Error | null, allow: boolean) => void) => {
+          if (!origin) {
+            cb(null, true);
+            return;
+          }
+          cb(null, corsAllowList.includes(origin));
+        };
+
   const app = Fastify({ logger: { level: "info" } });
-  await app.register(cors, { origin: corsOrigin, credentials: true });
+  await app.register(cors, { origin: corsOriginMatcher, credentials: true });
   await app.register(cookie);
+  app.addHook("onSend", async (_request, reply, payload) => {
+    reply.header("x-content-type-options", "nosniff");
+    reply.header("x-frame-options", "DENY");
+    reply.header("referrer-policy", "no-referrer");
+    reply.header("permissions-policy", "camera=(), microphone=(), geolocation=()");
+    reply.header("content-security-policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+    const hsts = getSecurityHeaderValue(sessionCookieSecure);
+    if (hsts) {
+      reply.header("strict-transport-security", hsts);
+    }
+    return payload;
+  });
 
   const sockets = new Set<WebSocket>();
   const socketActorId = new Map<WebSocket, string>();
@@ -319,7 +436,7 @@ export async function createBridgeApp(
     reply: FastifyReply,
     actorId: string
   ): FastifyReply | null {
-    const decision = apiLimiter.consume(`${actorId}|${getClientAddress(request)}`);
+    const decision = apiLimiter.consume(`${actorId}|${getClientAddress(request, trustProxyHeaders)}`);
     if (!decision.allowed) {
       return rejectRateLimited(reply, decision.retryAfterSeconds);
     }
@@ -412,7 +529,7 @@ export async function createBridgeApp(
   });
 
   app.post("/auth/login", async (request, reply) => {
-    const clientAddress = getClientAddress(request);
+    const clientAddress = getClientAddress(request, trustProxyHeaders);
     const loginBurst = loginLimiter.consume(clientAddress);
     if (!loginBurst.allowed) {
       return rejectRateLimited(reply, loginBurst.retryAfterSeconds);
@@ -448,14 +565,23 @@ export async function createBridgeApp(
     }
     loginFailureLimiter.reset(authAttemptKey);
 
+    const previousSessionId = sessionIdFromCookie(request.headers.cookie);
+    await deleteSession(previousSessionId);
     const { sessionId, expiresAt } = await createSession(user.id);
-    reply.setCookie("bridge_session", sessionId, {
-      httpOnly: true,
-      sameSite: "lax",
-      path: "/",
-      secure: false,
-      expires: new Date(expiresAt)
-    });
+    reply.setCookie(
+      "bridge_session",
+      sessionId,
+      sessionCookieConfig(sessionCookieSecure, sessionCookieSameSite, sessionCookieDomain, expiresAt)
+    );
+    broadcast(
+      appendAuditLog({
+        action: "auth.login",
+        actorId: user.id,
+        targetType: "user",
+        targetId: user.id,
+        summary: "Authenticated session login"
+      })
+    );
 
     return {
       user: {
@@ -535,7 +661,21 @@ export async function createBridgeApp(
     }
     const sessionId = sessionIdFromCookie(request.headers.cookie);
     await deleteSession(sessionId);
-    reply.clearCookie("bridge_session", { path: "/" });
+    reply.clearCookie(
+      "bridge_session",
+      clearSessionCookieConfig(sessionCookieSecure, sessionCookieSameSite, sessionCookieDomain)
+    );
+    if (actorId) {
+      broadcast(
+        appendAuditLog({
+          action: "auth.logout",
+          actorId,
+          targetType: "user",
+          targetId: actorId,
+          summary: "Session logout"
+        })
+      );
+    }
     return { ok: true };
   });
 
@@ -860,6 +1000,7 @@ export async function createBridgeApp(
     if (userEvent.type !== "user:updated") {
       return reply.code(500).send({ message: "unexpected user event type" });
     }
+    await deleteSessionsForUser(userId);
 
     const auditEvent = appendAuditLog({
       action: "user.role.updated",
@@ -898,6 +1039,7 @@ export async function createBridgeApp(
     if (userEvent.type !== "user:updated") {
       return reply.code(500).send({ message: "unexpected user event type" });
     }
+    await deleteSessionsForUser(userId);
 
     const auditEvent = appendAuditLog({
       action: "user.status.updated",
