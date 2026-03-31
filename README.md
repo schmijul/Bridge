@@ -6,6 +6,10 @@ Bridge is a privacy-first team messaging platform with real-time sync, workspace
 
 Screenshots below were refreshed for the current session-based login flow.
 
+### Login
+
+![Bridge Login](imgs/login.png)
+
 ### Chat Workspace
 
 ![Bridge Chat Workspace](imgs/chat-overview.png)
