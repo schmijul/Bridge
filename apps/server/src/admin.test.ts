@@ -23,6 +23,26 @@ async function makeSecureApp() {
   return app;
 }
 
+async function makeOidcApp() {
+  resetStore();
+  await initAuth(users);
+  const { app } = await createBridgeApp("http://localhost:5173", {
+    auth: {
+      mode: "oidc",
+      oidcEmailHeader: "x-test-email",
+      oidcDisplayNameHeader: "x-test-name",
+      oidcGroupsHeader: "x-test-groups",
+      roleGroups: {
+        admin: "bridge-admins",
+        manager: "bridge-managers",
+        member: "bridge-members",
+        guest: "bridge-guests"
+      }
+    }
+  });
+  return app;
+}
+
 async function loginAs(app: Awaited<ReturnType<typeof makeApp>>, email: string, password: string) {
   const login = await app.inject({
     method: "POST",
@@ -335,4 +355,96 @@ test("security headers and cookie flags are set on auth responses", async (t) =>
   assert.match(setCookie, /HttpOnly/i);
   assert.match(setCookie, /Secure/i);
   assert.match(setCookie, /SameSite=Strict/i);
+});
+
+test("oidc mode disables password login and exposes auth mode", async (t) => {
+  const app = await makeOidcApp();
+  t.after(async () => {
+    await app.close();
+  });
+
+  const mode = await app.inject({
+    method: "GET",
+    url: "/auth/mode"
+  });
+  assert.equal(mode.statusCode, 200);
+  assert.equal(mode.json().mode, "oidc");
+
+  const passwordLogin = await app.inject({
+    method: "POST",
+    url: "/auth/login",
+    payload: {
+      email: "alex@bridge.local",
+      password: "bridge123!"
+    }
+  });
+  assert.equal(passwordLogin.statusCode, 405);
+});
+
+test("oidc login can authenticate and sync role from groups", async (t) => {
+  const app = await makeOidcApp();
+  t.after(async () => {
+    await app.close();
+  });
+
+  const login = await app.inject({
+    method: "POST",
+    url: "/auth/oidc/login",
+    headers: {
+      "x-test-email": "nina@bridge.local",
+      "x-test-name": "Nina",
+      "x-test-groups": "bridge-admins,bridge-members"
+    }
+  });
+  assert.equal(login.statusCode, 200);
+  assert.equal(login.json().user.role, "admin");
+  const cookie = login.cookies.find((entry) => entry.name === "bridge_session");
+  assert.ok(cookie);
+
+  const overview = await app.inject({
+    method: "GET",
+    url: "/admin/overview",
+    cookies: { bridge_session: cookie.value }
+  });
+  assert.equal(overview.statusCode, 200);
+});
+
+test("admin audit export supports csv format", async (t) => {
+  const app = await makeApp();
+  t.after(async () => {
+    await app.close();
+  });
+
+  const sessionId = await loginAs(app, "alex@bridge.local", "bridge123!");
+  const exportCsv = await app.inject({
+    method: "GET",
+    url: "/admin/audit/export?format=csv",
+    cookies: { bridge_session: sessionId }
+  });
+  assert.equal(exportCsv.statusCode, 200);
+  assert.equal(exportCsv.headers["content-type"], "text/csv; charset=utf-8");
+  assert.match(exportCsv.body, /id,action,actorId,targetType,targetId,summary,createdAt/);
+});
+
+test("readiness endpoint returns dependency shape", async (t) => {
+  const app = await makeApp();
+  t.after(async () => {
+    await app.close();
+  });
+
+  const ready = await app.inject({
+    method: "GET",
+    url: "/ready"
+  });
+  assert.equal(ready.statusCode, 200);
+  const body = ready.json() as {
+    ok: boolean;
+    dependencies: {
+      store: { driver: string; ok: boolean };
+      redis: { configured: boolean; ok: boolean };
+    };
+  };
+  assert.equal(body.ok, true);
+  assert.equal(body.dependencies.store.ok, true);
+  assert.equal(body.dependencies.redis.configured, false);
 });

@@ -84,16 +84,20 @@ The Admin Board includes workspace governance and security controls (for example
 - `AUTH_LOGIN_RATE_LIMIT_MAX` and `AUTH_LOGIN_RATE_LIMIT_WINDOW_MS` tune login burst throttling
 - `AUTH_LOGIN_FAILURE_LIMIT_MAX` and `AUTH_LOGIN_FAILURE_LIMIT_WINDOW_MS` tune login brute-force lockout
 - `API_RATE_LIMIT_MAX` and `API_RATE_LIMIT_WINDOW_MS` tune authenticated API throttling
+- `AUTH_MODE` supports `local` (password login) and `oidc` (header-based SSO proxy flow)
 - `SESSION_COOKIE_SECURE=true` should be enabled behind HTTPS in production
 - `SESSION_COOKIE_SAMESITE` supports `lax` (default), `strict`, or `none`
 - `SESSION_COOKIE_DOMAIN` can scope cookies to your production domain
 - `TRUST_PROXY_HEADERS=true` enables `x-forwarded-for` client IP extraction behind trusted proxies
+- In `AUTH_MODE=oidc`, configure identity headers with `OIDC_EMAIL_HEADER`, `OIDC_DISPLAY_NAME_HEADER`, and `OIDC_GROUPS_HEADER`
+- Optional OIDC group-to-role mapping via `OIDC_ROLE_GROUP_ADMIN`, `OIDC_ROLE_GROUP_MANAGER`, `OIDC_ROLE_GROUP_MEMBER`, `OIDC_ROLE_GROUP_GUEST`
 
 ## Admin API
 
 Admin endpoints are protected by role and require a valid session cookie.
 
 - `GET /admin/overview`
+- `GET /admin/audit/export?format=json|csv`
 - `POST /admin/channels`
 - `PATCH /admin/channels/:channelId`
 - `POST /admin/channels/:channelId/members`
@@ -108,8 +112,14 @@ Admin endpoints are protected by role and require a valid session cookie.
 ## Auth API
 
 - `POST /auth/login` with `{ email, password }`
+- `POST /auth/oidc/login` (only when `AUTH_MODE=oidc`; identity from trusted proxy headers)
 - `GET /auth/me`
+- `GET /auth/mode`
 - `POST /auth/logout`
+
+## Readiness API
+
+- `GET /ready` returns dependency readiness (store + redis placeholder) with `200` when ready and `503` when not ready
 
 ## Search API
 

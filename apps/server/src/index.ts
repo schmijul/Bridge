@@ -7,6 +7,7 @@ import { initAuth } from "./auth.js";
 const envSchema = z.object({
   PORT: z.coerce.number().default(4000),
   CORS_ORIGIN: z.string().default("http://localhost:5173"),
+  AUTH_MODE: z.enum(["local", "oidc"]).default("local"),
   STORE_DRIVER: z.enum(["memory", "postgres"]).default("memory"),
   RUN_MIGRATIONS_ON_BOOT: z
     .string()
@@ -23,7 +24,9 @@ if (env.STORE_DRIVER === "postgres" && env.RUN_MIGRATIONS_ON_BOOT) {
 await initStore();
 await initAuth(users);
 
-const { app, attachRealtime } = await createBridgeApp(env.CORS_ORIGIN);
+const { app, attachRealtime } = await createBridgeApp(env.CORS_ORIGIN, {
+  auth: { mode: env.AUTH_MODE }
+});
 const server = await app.listen({ port: env.PORT, host: "0.0.0.0" });
 attachRealtime();
 

@@ -7,6 +7,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { ClientEvent, ServerEvent } from "@bridge/shared";
+import { getDbPool } from "./db.js";
 import {
   addMessage,
   appendAuditLog,
@@ -23,6 +24,7 @@ import {
   getAdminOverview,
   getMessagesForUser,
   getUnreadCountsForUser,
+  isPersistenceEnabled,
   nextSequence,
   getOnlineUserIds,
   getUserByEmail,
@@ -143,6 +145,15 @@ type RateLimitDecision = {
   retryAfterSeconds: number;
 };
 
+type AuthMode = "local" | "oidc";
+
+type OidcRoleGroups = {
+  admin: Set<string>;
+  manager: Set<string>;
+  member: Set<string>;
+  guest: Set<string>;
+};
+
 function createFixedWindowRateLimiter(maxHits: number, windowMs: number): {
   consume: (key: string) => RateLimitDecision;
   inspect: (key: string) => RateLimitDecision;
@@ -221,6 +232,55 @@ function parseCorsOrigins(corsOrigin: string): string[] {
     .split(",")
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+}
+
+function normalizeAuthMode(raw: string | undefined): AuthMode {
+  const normalized = (raw ?? "").trim().toLowerCase();
+  return normalized === "oidc" ? "oidc" : "local";
+}
+
+function parseGroupSet(raw: string | undefined): Set<string> {
+  if (!raw) {
+    return new Set<string>();
+  }
+  return new Set(
+    raw
+      .split(",")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry.length > 0)
+  );
+}
+
+function parseGroupsHeader(value: string | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+  return value
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0);
+}
+
+function resolveOidcRole(groups: string[], roleGroups: OidcRoleGroups): "admin" | "manager" | "member" | "guest" {
+  const groupSet = new Set(groups);
+  if ([...roleGroups.admin].some((group) => groupSet.has(group))) {
+    return "admin";
+  }
+  if ([...roleGroups.manager].some((group) => groupSet.has(group))) {
+    return "manager";
+  }
+  if ([...roleGroups.member].some((group) => groupSet.has(group))) {
+    return "member";
+  }
+  if ([...roleGroups.guest].some((group) => groupSet.has(group))) {
+    return "guest";
+  }
+  return "member";
+}
+
+function escapeCsv(value: string): string {
+  const escaped = value.replaceAll("\"", "\"\"");
+  return `"${escaped}"`;
 }
 
 function getClientAddress(request: FastifyRequest, trustProxyHeaders: boolean): string {
@@ -368,6 +428,18 @@ export async function createBridgeApp(
       sessionCookieSameSite?: "lax" | "strict" | "none";
       sessionCookieDomain?: string;
     };
+    auth?: {
+      mode?: AuthMode;
+      oidcEmailHeader?: string;
+      oidcDisplayNameHeader?: string;
+      oidcGroupsHeader?: string;
+      roleGroups?: {
+        admin?: string;
+        manager?: string;
+        member?: string;
+        guest?: string;
+      };
+    };
   }
 ): Promise<{
   app: FastifyInstance;
@@ -382,6 +454,30 @@ export async function createBridgeApp(
     normalizeSameSite(process.env.SESSION_COOKIE_SAMESITE);
   const sessionCookieDomain =
     options?.security?.sessionCookieDomain ?? process.env.SESSION_COOKIE_DOMAIN;
+  const authMode = options?.auth?.mode ?? normalizeAuthMode(process.env.AUTH_MODE);
+  const oidcEmailHeader = (options?.auth?.oidcEmailHeader ?? process.env.OIDC_EMAIL_HEADER ?? "x-auth-request-email")
+    .toLowerCase()
+    .trim();
+  const oidcDisplayNameHeader = (
+    options?.auth?.oidcDisplayNameHeader ??
+    process.env.OIDC_DISPLAY_NAME_HEADER ??
+    "x-auth-request-name"
+  )
+    .toLowerCase()
+    .trim();
+  const oidcGroupsHeader = (
+    options?.auth?.oidcGroupsHeader ??
+    process.env.OIDC_GROUPS_HEADER ??
+    "x-auth-request-groups"
+  )
+    .toLowerCase()
+    .trim();
+  const oidcRoleGroups: OidcRoleGroups = {
+    admin: parseGroupSet(options?.auth?.roleGroups?.admin ?? process.env.OIDC_ROLE_GROUP_ADMIN),
+    manager: parseGroupSet(options?.auth?.roleGroups?.manager ?? process.env.OIDC_ROLE_GROUP_MANAGER),
+    member: parseGroupSet(options?.auth?.roleGroups?.member ?? process.env.OIDC_ROLE_GROUP_MEMBER),
+    guest: parseGroupSet(options?.auth?.roleGroups?.guest ?? process.env.OIDC_ROLE_GROUP_GUEST)
+  };
   const corsAllowList = parseCorsOrigins(corsOrigin);
   const corsOriginMatcher =
     corsAllowList.length <= 1
@@ -509,6 +605,41 @@ export async function createBridgeApp(
     };
   });
 
+  app.get("/ready", async (_request, reply) => {
+    const storeDriver = isPersistenceEnabled() ? "postgres" : "memory";
+    let storeStatus: { ok: boolean; detail: string } = { ok: true, detail: "memory store active" };
+    if (isPersistenceEnabled()) {
+      try {
+        await getDbPool().query("SELECT 1");
+        storeStatus = { ok: true, detail: "postgres reachable" };
+      } catch (error) {
+        storeStatus = {
+          ok: false,
+          detail: `postgres check failed: ${error instanceof Error ? error.message : "unknown error"}`
+        };
+      }
+    }
+
+    const response = {
+      ok: storeStatus.ok,
+      timestamp: new Date().toISOString(),
+      dependencies: {
+        store: {
+          driver: storeDriver,
+          ...storeStatus
+        },
+        redis: {
+          configured: false,
+          ok: false,
+          detail: "not configured"
+        }
+      }
+    };
+    return reply.code(response.ok ? 200 : 503).send(response);
+  });
+
+  app.get("/auth/mode", async () => ({ mode: authMode }));
+
   app.get("/bootstrap", async (request, reply) => {
     const auth = await requireAuthenticated(request);
     if (!auth.ok) {
@@ -529,6 +660,9 @@ export async function createBridgeApp(
   });
 
   app.post("/auth/login", async (request, reply) => {
+    if (authMode !== "local") {
+      return reply.code(405).send({ message: "password login disabled; use oidc flow" });
+    }
     const clientAddress = getClientAddress(request, trustProxyHeaders);
     const loginBurst = loginLimiter.consume(clientAddress);
     if (!loginBurst.allowed) {
@@ -580,6 +714,82 @@ export async function createBridgeApp(
         targetType: "user",
         targetId: user.id,
         summary: "Authenticated session login"
+      })
+    );
+
+    return {
+      user: {
+        id: user.id,
+        displayName: user.displayName,
+        email: user.email,
+        role: user.role
+      }
+    };
+  });
+
+  app.post("/auth/oidc/login", async (request, reply) => {
+    if (authMode !== "oidc") {
+      return reply.code(404).send({ message: "oidc auth flow disabled" });
+    }
+
+    const clientAddress = getClientAddress(request, trustProxyHeaders);
+    const loginBurst = loginLimiter.consume(clientAddress);
+    if (!loginBurst.allowed) {
+      return rejectRateLimited(reply, loginBurst.retryAfterSeconds);
+    }
+
+    const emailHeader = request.headers[oidcEmailHeader];
+    const displayNameHeader = request.headers[oidcDisplayNameHeader];
+    const groupsHeader = request.headers[oidcGroupsHeader];
+    const email = (Array.isArray(emailHeader) ? emailHeader[0] : emailHeader)?.trim().toLowerCase();
+    if (!email) {
+      return reply.code(401).send({ message: "missing oidc identity headers" });
+    }
+
+    const user = getUserByEmail(email);
+    if (!user || !user.isActive) {
+      return reply.code(403).send({ message: "oidc user is not provisioned or inactive" });
+    }
+
+    const groups = parseGroupsHeader(Array.isArray(groupsHeader) ? groupsHeader[0] : groupsHeader);
+    const mappedRole = resolveOidcRole(groups, oidcRoleGroups);
+    if (user.role !== mappedRole) {
+      const roleEvent = updateUserRole(user.id, mappedRole);
+      await deleteSessionsForUser(user.id);
+      if (roleEvent) {
+        broadcast(roleEvent);
+      }
+      broadcast(
+        appendAuditLog({
+          action: "auth.oidc.role_synced",
+          actorId: user.id,
+          targetType: "user",
+          targetId: user.id,
+          summary: `Synchronized role from OIDC groups to ${mappedRole}`
+        })
+      );
+    }
+
+    const previousSessionId = sessionIdFromCookie(request.headers.cookie);
+    await deleteSession(previousSessionId);
+    const { sessionId, expiresAt } = await createSession(user.id);
+    reply.setCookie(
+      "bridge_session",
+      sessionId,
+      sessionCookieConfig(sessionCookieSecure, sessionCookieSameSite, sessionCookieDomain, expiresAt)
+    );
+
+    const resolvedDisplayName = (
+      Array.isArray(displayNameHeader) ? displayNameHeader[0] : displayNameHeader
+    )?.trim();
+
+    broadcast(
+      appendAuditLog({
+        action: "auth.oidc.login",
+        actorId: user.id,
+        targetType: "user",
+        targetId: user.id,
+        summary: `OIDC login${resolvedDisplayName ? ` as ${resolvedDisplayName}` : ""}`
       })
     );
 
@@ -775,6 +985,53 @@ export async function createBridgeApp(
       return limited;
     }
     return getAdminOverview();
+  });
+
+  app.get("/admin/audit/export", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const parsed = z
+      .object({
+        format: z.enum(["json", "csv"]).default("json")
+      })
+      .safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid audit export query" });
+    }
+
+    const entries = getAdminOverview().auditLog;
+    if (parsed.data.format === "json") {
+      return {
+        format: "json",
+        count: entries.length,
+        entries
+      };
+    }
+
+    const header = "id,action,actorId,targetType,targetId,summary,createdAt";
+    const rows = entries.map((entry) =>
+      [
+        entry.id,
+        entry.action,
+        entry.actorId,
+        entry.targetType,
+        entry.targetId,
+        entry.summary,
+        entry.createdAt
+      ]
+        .map((value) => escapeCsv(String(value)))
+        .join(",")
+    );
+    const csv = [header, ...rows].join("\n");
+    reply.header("content-type", "text/csv; charset=utf-8");
+    return reply.send(csv);
   });
 
   app.post("/admin/channels", async (request, reply) => {
