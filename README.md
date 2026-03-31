@@ -79,6 +79,7 @@ The Admin Board includes workspace governance and security controls (for example
 ### Server environment
 
 - `DATABASE_URL` points to Postgres (for migrations and upcoming persistent storage)
+- `REDIS_URL` configures Redis reachability checks and upcoming realtime coordination features
 - `STORE_DRIVER=postgres` enables persistent storage; use `memory` for local test-only mode
 - `RUN_MIGRATIONS_ON_BOOT=true` applies migrations on server startup in Postgres mode
 - `AUTH_LOGIN_RATE_LIMIT_MAX` and `AUTH_LOGIN_RATE_LIMIT_WINDOW_MS` tune login burst throttling
@@ -97,7 +98,7 @@ The Admin Board includes workspace governance and security controls (for example
 Admin endpoints are protected by role and require a valid session cookie.
 
 - `GET /admin/overview`
-- `GET /admin/audit/export?format=json|csv`
+- `GET /admin/audit/export?format=json|csv&action=&actorId=&since=&until=&offset=&limit=`
 - `POST /admin/channels`
 - `PATCH /admin/channels/:channelId`
 - `POST /admin/channels/:channelId/members`
@@ -119,7 +120,7 @@ Admin endpoints are protected by role and require a valid session cookie.
 
 ## Readiness API
 
-- `GET /ready` returns dependency readiness (store + redis placeholder) with `200` when ready and `503` when not ready
+- `GET /ready` returns dependency readiness for store and Redis with `200` when ready and `503` when required dependencies are unhealthy
 
 ## Search API
 

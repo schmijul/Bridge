@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import { WebSocketServer, type WebSocket } from "ws";
+import net from "node:net";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -281,6 +282,45 @@ function resolveOidcRole(groups: string[], roleGroups: OidcRoleGroups): "admin" 
 function escapeCsv(value: string): string {
   const escaped = value.replaceAll("\"", "\"\"");
   return `"${escaped}"`;
+}
+
+async function checkRedisReadiness(redisUrl: string | undefined): Promise<{
+  configured: boolean;
+  ok: boolean;
+  detail: string;
+}> {
+  if (!redisUrl) {
+    return { configured: false, ok: false, detail: "not configured" };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(redisUrl);
+  } catch {
+    return { configured: true, ok: false, detail: "invalid REDIS_URL" };
+  }
+
+  const host = parsed.hostname;
+  const port = Number.parseInt(parsed.port || "6379", 10);
+  const timeoutMs = 1500;
+
+  return await new Promise((resolvePromise) => {
+    const socket = net.createConnection({ host, port });
+    let settled = false;
+
+    const finalize = (ok: boolean, detail: string) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.destroy();
+      resolvePromise({ configured: true, ok, detail });
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.on("connect", () => finalize(true, "reachable"));
+    socket.on("timeout", () => finalize(false, "timeout"));
+    socket.on("error", (error) => finalize(false, `unreachable: ${error.message}`));
+  });
 }
 
 function getClientAddress(request: FastifyRequest, trustProxyHeaders: boolean): string {
@@ -620,19 +660,16 @@ export async function createBridgeApp(
       }
     }
 
+    const redisStatus = await checkRedisReadiness(process.env.REDIS_URL);
     const response = {
-      ok: storeStatus.ok,
+      ok: storeStatus.ok && (!redisStatus.configured || redisStatus.ok),
       timestamp: new Date().toISOString(),
       dependencies: {
         store: {
           driver: storeDriver,
           ...storeStatus
         },
-        redis: {
-          configured: false,
-          ok: false,
-          detail: "not configured"
-        }
+        redis: redisStatus
       }
     };
     return reply.code(response.ok ? 200 : 503).send(response);
@@ -999,17 +1036,41 @@ export async function createBridgeApp(
 
     const parsed = z
       .object({
-        format: z.enum(["json", "csv"]).default("json")
+        format: z.enum(["json", "csv"]).default("json"),
+        action: z.string().trim().min(1).optional(),
+        actorId: z.string().trim().min(1).optional(),
+        since: z.string().datetime().optional(),
+        until: z.string().datetime().optional(),
+        offset: z.coerce.number().int().min(0).max(5000).default(0),
+        limit: z.coerce.number().int().min(1).max(500).default(200)
       })
       .safeParse(request.query);
     if (!parsed.success) {
       return reply.code(400).send({ message: "invalid audit export query" });
     }
-
-    const entries = getAdminOverview().auditLog;
+    const allEntries = getAdminOverview().auditLog;
+    const filtered = allEntries.filter((entry) => {
+      if (parsed.data.action && entry.action !== parsed.data.action) {
+        return false;
+      }
+      if (parsed.data.actorId && entry.actorId !== parsed.data.actorId) {
+        return false;
+      }
+      if (parsed.data.since && new Date(entry.createdAt).getTime() < new Date(parsed.data.since).getTime()) {
+        return false;
+      }
+      if (parsed.data.until && new Date(entry.createdAt).getTime() > new Date(parsed.data.until).getTime()) {
+        return false;
+      }
+      return true;
+    });
+    const entries = filtered.slice(parsed.data.offset, parsed.data.offset + parsed.data.limit);
     if (parsed.data.format === "json") {
       return {
         format: "json",
+        total: filtered.length,
+        offset: parsed.data.offset,
+        limit: parsed.data.limit,
         count: entries.length,
         entries
       };

@@ -426,6 +426,35 @@ test("admin audit export supports csv format", async (t) => {
   assert.match(exportCsv.body, /id,action,actorId,targetType,targetId,summary,createdAt/);
 });
 
+test("admin audit export supports filtering and pagination", async (t) => {
+  const app = await makeApp();
+  t.after(async () => {
+    await app.close();
+  });
+
+  const sessionId = await loginAs(app, "alex@bridge.local", "bridge123!");
+  const exportJson = await app.inject({
+    method: "GET",
+    url: "/admin/audit/export?format=json&action=auth.login&offset=0&limit=1",
+    cookies: { bridge_session: sessionId }
+  });
+  assert.equal(exportJson.statusCode, 200);
+  const body = exportJson.json() as {
+    format: string;
+    total: number;
+    offset: number;
+    limit: number;
+    count: number;
+    entries: Array<{ action: string }>;
+  };
+  assert.equal(body.format, "json");
+  assert.equal(body.offset, 0);
+  assert.equal(body.limit, 1);
+  assert.ok(body.total >= 1);
+  assert.equal(body.count, 1);
+  assert.equal(body.entries[0]?.action, "auth.login");
+});
+
 test("readiness endpoint returns dependency shape", async (t) => {
   const app = await makeApp();
   t.after(async () => {
@@ -447,4 +476,33 @@ test("readiness endpoint returns dependency shape", async (t) => {
   assert.equal(body.ok, true);
   assert.equal(body.dependencies.store.ok, true);
   assert.equal(body.dependencies.redis.configured, false);
+});
+
+test("readiness endpoint fails when configured redis is unreachable", async (t) => {
+  const previousRedisUrl = process.env.REDIS_URL;
+  process.env.REDIS_URL = "redis://127.0.0.1:1";
+  const app = await makeApp();
+  t.after(async () => {
+    if (previousRedisUrl === undefined) {
+      delete process.env.REDIS_URL;
+    } else {
+      process.env.REDIS_URL = previousRedisUrl;
+    }
+    await app.close();
+  });
+
+  const ready = await app.inject({
+    method: "GET",
+    url: "/ready"
+  });
+  assert.equal(ready.statusCode, 503);
+  const body = ready.json() as {
+    ok: boolean;
+    dependencies: {
+      redis: { configured: boolean; ok: boolean };
+    };
+  };
+  assert.equal(body.ok, false);
+  assert.equal(body.dependencies.redis.configured, true);
+  assert.equal(body.dependencies.redis.ok, false);
 });
