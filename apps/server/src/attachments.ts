@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { Readable } from "node:stream";
+import { promisify } from "node:util";
 import { GetObjectCommand, PutObjectCommand, DeleteObjectCommand, S3Client } from "@aws-sdk/client-s3";
+
+const execFileAsync = promisify(execFile);
 
 export type AttachmentUploadInput = {
   bytes: Buffer;
@@ -19,6 +24,15 @@ export type AttachmentStorage = {
   upload: (input: AttachmentUploadInput) => Promise<StoredAttachment>;
   removeByKey: (storageKey: string) => Promise<void>;
   readByKey: (storageKey: string) => Promise<{ stream: Readable; sizeBytes?: number; mimeType?: string }>;
+};
+
+export type AttachmentScanResult = {
+  ok: boolean;
+  detail: string;
+};
+
+export type AttachmentScanner = {
+  scan: (input: AttachmentUploadInput) => Promise<AttachmentScanResult>;
 };
 
 type LocalStorageConfig = {
@@ -38,6 +52,18 @@ type S3StorageConfig = {
 };
 
 export type AttachmentStorageConfig = LocalStorageConfig | S3StorageConfig;
+
+type NoopScannerConfig = {
+  mode: "none";
+};
+
+type CommandScannerConfig = {
+  mode: "command";
+  command: string;
+  timeoutMs: number;
+};
+
+export type AttachmentScannerConfig = NoopScannerConfig | CommandScannerConfig;
 
 export function parseBlockedExtensions(raw: string | undefined): Set<string> {
   const fallback = ["bat", "cmd", "com", "cpl", "exe", "js", "mjs", "cjs", "msi", "ps1", "scr", "sh", "vbs"];
@@ -71,6 +97,56 @@ export function parseAttachmentStorageConfig(env: NodeJS.ProcessEnv): Attachment
   return {
     driver: "local",
     rootDir: env.ATTACHMENT_LOCAL_DIR ?? join(process.cwd(), ".bridge_uploads")
+  };
+}
+
+export function parseAttachmentScannerConfig(env: NodeJS.ProcessEnv): AttachmentScannerConfig {
+  const mode = (env.ATTACHMENT_SCAN_MODE ?? "none").trim().toLowerCase();
+  if (mode === "command") {
+    const command = (env.ATTACHMENT_SCAN_COMMAND ?? "").trim();
+    if (!command) {
+      throw new Error("ATTACHMENT_SCAN_MODE=command requires ATTACHMENT_SCAN_COMMAND");
+    }
+    const timeoutRaw = Number.parseInt(env.ATTACHMENT_SCAN_TIMEOUT_MS ?? "10000", 10);
+    const timeoutMs = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : 10000;
+    return {
+      mode: "command",
+      command,
+      timeoutMs
+    };
+  }
+  return { mode: "none" };
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\"'\"'")}'`;
+}
+
+export function createAttachmentScanner(config: AttachmentScannerConfig): AttachmentScanner {
+  if (config.mode === "command") {
+    return {
+      async scan(input: AttachmentUploadInput): Promise<AttachmentScanResult> {
+        const scanDir = await mkdtemp(join(tmpdir(), "bridge-scan-"));
+        const scanFile = join(scanDir, safeFilename(input.originalName));
+        try {
+          await writeFile(scanFile, input.bytes);
+          const command = config.command.replaceAll("{file}", shellQuote(scanFile));
+          await execFileAsync("bash", ["-lc", command], { timeout: config.timeoutMs });
+          return { ok: true, detail: "scan passed" };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "scanner command failed";
+          return { ok: false, detail: message };
+        } finally {
+          await rm(scanDir, { recursive: true, force: true });
+        }
+      }
+    };
+  }
+
+  return {
+    async scan(): Promise<AttachmentScanResult> {
+      return { ok: true, detail: "scan disabled" };
+    }
   };
 }
 

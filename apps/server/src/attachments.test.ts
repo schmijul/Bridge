@@ -33,12 +33,24 @@ function buildMultipartBody(input: {
   return Buffer.concat(lines);
 }
 
-async function makeApp(suffix: string) {
+async function makeApp(
+  suffix: string,
+  options?: {
+    scanMode?: "none" | "command";
+    scanCommand?: string;
+  }
+) {
   resetStore();
   await initAuth(users);
   const uploadDir = join(process.cwd(), `.bridge_uploads_test_${suffix}`);
   process.env.ATTACHMENT_STORAGE_DRIVER = "local";
   process.env.ATTACHMENT_LOCAL_DIR = uploadDir;
+  process.env.ATTACHMENT_SCAN_MODE = options?.scanMode ?? "none";
+  if (options?.scanCommand) {
+    process.env.ATTACHMENT_SCAN_COMMAND = options.scanCommand;
+  } else {
+    delete process.env.ATTACHMENT_SCAN_COMMAND;
+  }
   const { app } = await createBridgeApp("http://localhost:5173");
   return { app, uploadDir };
 }
@@ -198,4 +210,36 @@ test("policy rejects blocked extension and supports pending removal", async (t) 
     cookies: { bridge_session: sessionId }
   });
   assert.equal(missing.statusCode, 404);
+});
+
+test("scanner command can reject attachment payloads", async (t) => {
+  const { app, uploadDir } = await makeApp("scanner", {
+    scanMode: "command",
+    scanCommand: "/bin/false"
+  });
+  t.after(async () => {
+    await app.close();
+    await rm(uploadDir, { recursive: true, force: true });
+  });
+
+  const sessionId = await loginAs(app, "alex@bridge.local", "bridge123!");
+  const boundary = "boundary-scanner";
+  const body = buildMultipartBody({
+    boundary,
+    channelId: "c-general",
+    filename: "suspicious.txt",
+    mimeType: "text/plain",
+    content: Buffer.from("scanner should reject this")
+  });
+  const response = await app.inject({
+    method: "POST",
+    url: "/attachments",
+    cookies: { bridge_session: sessionId },
+    payload: body,
+    headers: {
+      "content-type": `multipart/form-data; boundary=${boundary}`
+    }
+  });
+  assert.equal(response.statusCode, 400);
+  assert.match(response.body, /malware scanner/i);
 });

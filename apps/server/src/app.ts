@@ -50,8 +50,10 @@ import {
   workspace
 } from "./store.js";
 import {
+  createAttachmentScanner,
   createAttachmentStorage,
   fileExtension,
+  parseAttachmentScannerConfig,
   parseAttachmentStorageConfig,
   parseBlockedExtensions,
   readStreamToBuffer,
@@ -581,6 +583,7 @@ export async function createBridgeApp(
     guest: parseGroupSet(options?.auth?.roleGroups?.guest ?? process.env.OIDC_ROLE_GROUP_GUEST)
   };
   const attachmentStorage = createAttachmentStorage(parseAttachmentStorageConfig(process.env));
+  const attachmentScanner = createAttachmentScanner(parseAttachmentScannerConfig(process.env));
   const attachmentMaxBytes = envNumber("ATTACHMENT_MAX_SIZE_BYTES", 25 * 1024 * 1024);
   const blockedAttachmentExtensions = parseBlockedExtensions(process.env.ATTACHMENT_BLOCKED_EXTENSIONS);
   const corsAllowList = parseCorsOrigins(corsOrigin);
@@ -820,6 +823,19 @@ export async function createBridgeApp(
     }
 
     const mimeType = inferMimeType(filePart.mimetype, originalName);
+    const scan = await attachmentScanner.scan({ bytes, mimeType, originalName });
+    if (!scan.ok) {
+      const rejectedAuditEvent = appendAuditLog({
+        action: "attachment.rejected",
+        actorId: auth.actorId,
+        targetType: "attachment",
+        targetId: `${channelId}:${originalName}`,
+        summary: `Rejected attachment ${originalName}: malware scanner blocked upload`
+      });
+      broadcast(rejectedAuditEvent);
+      return reply.code(400).send({ message: "attachment rejected by malware scanner" });
+    }
+
     const stored = await attachmentStorage.upload({ bytes, mimeType, originalName });
     const attachment = createPendingAttachment({
       channelId,

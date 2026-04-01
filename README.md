@@ -93,6 +93,9 @@ The Admin Board includes workspace governance and security controls (for example
 - `ATTACHMENT_STORAGE_DRIVER` supports `local` (default) or `s3`
 - `ATTACHMENT_LOCAL_DIR` sets local upload directory for `local` driver
 - `ATTACHMENT_MAX_SIZE_BYTES` sets max upload size in bytes
+- `ATTACHMENT_SCAN_MODE` supports `none` (default) or `command`
+- `ATTACHMENT_SCAN_COMMAND` is required for `ATTACHMENT_SCAN_MODE=command` and must include `{file}` placeholder (example: `clamscan --no-summary {file}`)
+- `ATTACHMENT_SCAN_TIMEOUT_MS` controls scanner command timeout
 - `ATTACHMENT_BLOCKED_EXTENSIONS` overrides blocked executable/script extensions
 - For `ATTACHMENT_STORAGE_DRIVER=s3`, configure `ATTACHMENT_S3_BUCKET`, `ATTACHMENT_S3_REGION`, optional `ATTACHMENT_S3_ENDPOINT`, `ATTACHMENT_S3_KEY_PREFIX`, `ATTACHMENT_S3_FORCE_PATH_STYLE`, `ATTACHMENT_S3_ACCESS_KEY_ID`, and `ATTACHMENT_S3_SECRET_ACCESS_KEY`
 - In `AUTH_MODE=oidc`, configure identity headers with `OIDC_EMAIL_HEADER`, `OIDC_DISPLAY_NAME_HEADER`, and `OIDC_GROUPS_HEADER`
@@ -194,6 +197,7 @@ Implemented:
 - Attachment v1 shipped:
   - message attachments in shared contracts/bootstrap payloads
   - upload endpoint with size and extension policy enforcement
+  - optional scanner hook (`ATTACHMENT_SCAN_MODE=command`) for AV command integration
   - local and S3-compatible storage drivers
   - attachment download endpoint with channel ACL checks
   - pending upload removal endpoint
@@ -209,7 +213,7 @@ Still required for production replacement:
 - Backup/restore automation with restore verification in CI/staging
 - Mattermost migration tooling (users/channels and optional history)
 - Desktop/mobile clients (Phase 2) and notification strategy
-- Malware-scanning integration for attachments (current v1 has policy checks and storage drivers, but no AV scanner yet)
+- Scanner hardening for attachments (production ClamAV deployment pattern, health checks, and signature update runbook)
 
 ## Validation Pipeline
 
