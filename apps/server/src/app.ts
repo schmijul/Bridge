@@ -3,7 +3,6 @@ import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import multipart from "@fastify/multipart";
 import { WebSocketServer, type WebSocket } from "ws";
-import net from "node:net";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,6 +63,7 @@ import {
   createEncryptedAttachmentStorage,
   parseAttachmentEncryptionConfig
 } from "./attachment-encryption.js";
+import { createRealtimeCoordinator } from "./realtime.js";
 import {
   createBotToken,
   createSession,
@@ -338,45 +338,6 @@ function renderPrometheusCounters(counters: CounterMap): string {
   return `${lines.join("\n")}\n`;
 }
 
-async function checkRedisReadiness(redisUrl: string | undefined): Promise<{
-  configured: boolean;
-  ok: boolean;
-  detail: string;
-}> {
-  if (!redisUrl) {
-    return { configured: false, ok: false, detail: "not configured" };
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(redisUrl);
-  } catch {
-    return { configured: true, ok: false, detail: "invalid REDIS_URL" };
-  }
-
-  const host = parsed.hostname;
-  const port = Number.parseInt(parsed.port || "6379", 10);
-  const timeoutMs = 1500;
-
-  return await new Promise((resolvePromise) => {
-    const socket = net.createConnection({ host, port });
-    let settled = false;
-
-    const finalize = (ok: boolean, detail: string) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      socket.destroy();
-      resolvePromise({ configured: true, ok, detail });
-    };
-
-    socket.setTimeout(timeoutMs);
-    socket.on("connect", () => finalize(true, "reachable"));
-    socket.on("timeout", () => finalize(false, "timeout"));
-    socket.on("error", (error) => finalize(false, `unreachable: ${error.message}`));
-  });
-}
-
 function getClientAddress(request: FastifyRequest, trustProxyHeaders: boolean): string {
   if (trustProxyHeaders) {
     const forwarded = request.headers["x-forwarded-for"];
@@ -620,6 +581,7 @@ export async function createBridgeApp(
   const attachmentScanner = createAttachmentScanner(parseAttachmentScannerConfig(process.env));
   const attachmentMaxBytes = envNumber("ATTACHMENT_MAX_SIZE_BYTES", 25 * 1024 * 1024);
   const blockedAttachmentExtensions = parseBlockedExtensions(process.env.ATTACHMENT_BLOCKED_EXTENSIONS);
+  const realtime = await createRealtimeCoordinator(process.env.REDIS_URL);
   const corsAllowList = parseCorsOrigins(corsOrigin);
   const corsOriginMatcher =
     corsAllowList.length <= 1
@@ -636,6 +598,9 @@ export async function createBridgeApp(
   await app.register(cors, { origin: corsOriginMatcher, credentials: true });
   await app.register(cookie);
   await app.register(multipart);
+  app.addHook("onClose", async () => {
+    await realtime.close();
+  });
   app.addHook("onSend", async (_request, reply, payload) => {
     reply.header("x-content-type-options", "nosniff");
     reply.header("x-frame-options", "DENY");
@@ -708,6 +673,10 @@ export async function createBridgeApp(
   }
 
   function broadcast(event: ServerEvent): void {
+    realtime.publish(event);
+  }
+
+  const sendToSockets = (event: ServerEvent): void => {
     const encoded = JSON.stringify(event);
     for (const socket of sockets) {
       const actorId = socketActorId.get(socket);
@@ -722,7 +691,7 @@ export async function createBridgeApp(
         socket.send(encoded);
       }
     }
-  }
+  };
 
   app.get("/health", async () => {
     let buildMeta: Record<string, unknown> = { note: "build metadata unavailable" };
@@ -774,7 +743,7 @@ export async function createBridgeApp(
       }
     }
 
-    const redisStatus = await checkRedisReadiness(process.env.REDIS_URL);
+    const redisStatus = realtime.status();
     const response = {
       ok: storeStatus.ok && (!redisStatus.configured || redisStatus.ok),
       timestamp: new Date().toISOString(),
@@ -1869,6 +1838,7 @@ export async function createBridgeApp(
 
   const attachRealtime = () => {
     const wss = new WebSocketServer({ server: app.server });
+    realtime.subscribe(sendToSockets);
 
     wss.on("connection", async (socket, request) => {
       const requestLike = { headers: request.headers } as FastifyRequest;
