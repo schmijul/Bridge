@@ -4,6 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createBridgeApp } from "./app.js";
 import { initAuth } from "./auth.js";
+import { createAttachmentStorage, parseAttachmentStorageConfig } from "./attachments.js";
 import { addMessage, resetStore, users } from "./store.js";
 
 function buildMultipartBody(input: {
@@ -242,4 +243,90 @@ test("scanner command can reject attachment payloads", async (t) => {
   });
   assert.equal(response.statusCode, 400);
   assert.match(response.body, /malware scanner/i);
+});
+
+test("webdav attachment storage uploads, reads and deletes via WebDAV semantics", async () => {
+  const config = parseAttachmentStorageConfig({
+    ATTACHMENT_STORAGE_DRIVER: "webdav",
+    ATTACHMENT_WEBDAV_BASE_URL: "https://cloud.example.com/remote.php/dav/files/bridge/",
+    ATTACHMENT_WEBDAV_USERNAME: "bridge-bot",
+    ATTACHMENT_WEBDAV_APP_PASSWORD: "super-secret-token",
+    ATTACHMENT_WEBDAV_PATH_PREFIX: "Bridge/attachments"
+  });
+
+  const stored = new Map<string, Buffer>();
+  const calls: Array<{ method: string; url: string; headers: Record<string, string> }> = [];
+  const fetchMock: typeof fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input.toString();
+    const method = (init?.method ?? "GET").toUpperCase();
+    const headers = Object.fromEntries(
+      new Headers(init?.headers).entries()
+    ) as Record<string, string>;
+    calls.push({ method, url, headers });
+    const pathname = new URL(url).pathname;
+
+    if (method === "MKCOL") {
+      return new Response(null, { status: 201 });
+    }
+    if (method === "PUT") {
+      const bodyValue = init?.body;
+      let body: Buffer;
+      if (bodyValue instanceof Uint8Array) {
+        body = Buffer.from(bodyValue);
+      } else if (typeof bodyValue === "string") {
+        body = Buffer.from(bodyValue, "utf8");
+      } else if (bodyValue instanceof ArrayBuffer) {
+        body = Buffer.from(bodyValue);
+      } else {
+        throw new Error("unexpected PUT body type");
+      }
+      stored.set(pathname, body);
+      return new Response(null, { status: 201 });
+    }
+    if (method === "GET") {
+      const body = stored.get(pathname);
+      if (!body) {
+        return new Response("missing", { status: 404 });
+      }
+      return new Response(new Uint8Array(body), {
+        status: 200,
+        headers: {
+          "content-type": "text/plain",
+          "content-length": String(body.length)
+        }
+      });
+    }
+    if (method === "DELETE") {
+      stored.delete(pathname);
+      return new Response(null, { status: 204 });
+    }
+    return new Response("unexpected method", { status: 405 });
+  };
+
+  const storage = createAttachmentStorage(config, { fetch: fetchMock });
+  const uploaded = await storage.upload({
+    bytes: Buffer.from("webdav-body"),
+    mimeType: "text/plain",
+    originalName: "report.txt"
+  });
+  assert.match(uploaded.storageKey, /^Bridge\/attachments\/[0-9a-f-]+-report\.txt$/);
+
+  const read = await storage.readByKey(uploaded.storageKey);
+  const chunks: Buffer[] = [];
+  for await (const chunk of read.stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  assert.equal(Buffer.concat(chunks).toString("utf8"), "webdav-body");
+  assert.equal(read.mimeType, "text/plain");
+  assert.equal(read.sizeBytes, "webdav-body".length);
+
+  await storage.removeByKey(uploaded.storageKey);
+  assert.equal(stored.has(new URL(calls.at(-1)?.url ?? "").pathname), false);
+
+  assert.deepEqual(
+    calls.map((entry) => entry.method),
+    ["MKCOL", "MKCOL", "PUT", "GET", "DELETE"]
+  );
+  assert.match(calls[2]!.headers.authorization, /^Basic /);
+  assert.equal(calls[2]!.headers["content-type"], "text/plain");
 });
