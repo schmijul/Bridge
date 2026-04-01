@@ -93,6 +93,7 @@ The Admin Board includes workspace governance and security controls (for example
 - `ATTACHMENT_STORAGE_DRIVER` supports `local` (default), `s3`, or `webdav`
 - `ATTACHMENT_LOCAL_DIR` sets local upload directory for `local` driver
 - `ATTACHMENT_MAX_SIZE_BYTES` sets max upload size in bytes
+- `ATTACHMENT_ENCRYPTION_KEY` enables at-rest encryption for attachments when set; provide a 32-byte key as hex or base64
 - `ATTACHMENT_SCAN_MODE` supports `none` (default) or `command`
 - `ATTACHMENT_SCAN_COMMAND` is required for `ATTACHMENT_SCAN_MODE=command` and must include `{file}` placeholder (example: `clamscan --no-summary {file}`)
 - `ATTACHMENT_SCAN_TIMEOUT_MS` controls scanner command timeout
@@ -180,6 +181,7 @@ Implemented:
 - Threads/replies with `threadRootMessageId` metadata
 - Mentions metadata extraction on message send (`mentionUserIds`)
 - Attachment uploads with pending queue, message binding, ACL-protected download, and retention/moderation cleanup
+- Optional AES-256-GCM at-rest encryption for attachment payloads via `ATTACHMENT_ENCRYPTION_KEY`
 - Unread counters endpoint and server-side read-state tracking (`GET /me/unread`)
 - Auth/API boundary rate limiting and brute-force protections (`429` + `retry-after`)
 - Optional Postgres-backed persistence (`STORE_DRIVER=postgres`)
@@ -200,6 +202,7 @@ Implemented:
 - Attachment v1 shipped:
   - message attachments in shared contracts/bootstrap payloads
   - upload endpoint with size and extension policy enforcement
+  - optional AES-256-GCM at-rest encryption for attachment payloads via `ATTACHMENT_ENCRYPTION_KEY`
   - optional scanner hook (`ATTACHMENT_SCAN_MODE=command`) for AV command integration
   - local and S3-compatible storage drivers
   - Nextcloud-compatible WebDAV storage driver
@@ -219,6 +222,7 @@ Still required for production replacement:
 - Desktop/mobile clients (Phase 2) and notification strategy
 - Scanner hardening for attachments (production ClamAV deployment pattern, health checks, and signature update runbook)
 - Nextcloud/WebDAV production hardening notes and credentials rotation guidance for attachment storage
+- Key rotation and envelope migration plan for attachment encryption
 
 ## Validation Pipeline
 

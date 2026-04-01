@@ -39,6 +39,7 @@ async function makeApp(
   options?: {
     scanMode?: "none" | "command";
     scanCommand?: string;
+    encryptionKey?: string;
   }
 ) {
   resetStore();
@@ -46,6 +47,11 @@ async function makeApp(
   const uploadDir = join(process.cwd(), `.bridge_uploads_test_${suffix}`);
   process.env.ATTACHMENT_STORAGE_DRIVER = "local";
   process.env.ATTACHMENT_LOCAL_DIR = uploadDir;
+  if (options?.encryptionKey) {
+    process.env.ATTACHMENT_ENCRYPTION_KEY = options.encryptionKey;
+  } else {
+    delete process.env.ATTACHMENT_ENCRYPTION_KEY;
+  }
   process.env.ATTACHMENT_SCAN_MODE = options?.scanMode ?? "none";
   if (options?.scanCommand) {
     process.env.ATTACHMENT_SCAN_COMMAND = options.scanCommand;
@@ -141,6 +147,50 @@ test("uploaded attachment can be linked into a message and downloaded", async (t
   assert.ok(matching);
   assert.equal(matching.attachments?.length, 1);
   assert.equal(matching.attachments?.[0]?.id, attachmentId);
+
+  const download = await app.inject({
+    method: "GET",
+    url: `/attachments/${attachmentId}/download`,
+    cookies: { bridge_session: sessionId }
+  });
+  assert.equal(download.statusCode, 200);
+  assert.equal(download.body, content.toString("utf8"));
+});
+
+test("encrypted attachment storage still works end to end", async (t) => {
+  const { app, uploadDir } = await makeApp("encrypted", {
+    encryptionKey: Buffer.alloc(32, 19).toString("hex")
+  });
+  t.after(async () => {
+    await app.close();
+    await rm(uploadDir, { recursive: true, force: true });
+  });
+
+  const sessionId = await loginAs(app, "alex@bridge.local", "bridge123!");
+  const boundary = "boundary-encrypted";
+  const content = Buffer.from("encrypted attachment body");
+  const uploadBody = buildMultipartBody({
+    boundary,
+    channelId: "c-general",
+    filename: "secret.txt",
+    mimeType: "text/plain",
+    content
+  });
+  const upload = await app.inject({
+    method: "POST",
+    url: "/attachments",
+    cookies: { bridge_session: sessionId },
+    payload: uploadBody,
+    headers: {
+      "content-type": `multipart/form-data; boundary=${boundary}`
+    }
+  });
+  assert.equal(upload.statusCode, 201);
+  const attachmentId = upload.json().attachment.id as string;
+
+  addMessage("c-general", "u-1", "Encrypted attachment attached", {
+    attachmentIds: [attachmentId]
+  });
 
   const download = await app.inject({
     method: "GET",
