@@ -189,7 +189,9 @@ Admin endpoints are protected by role and require a valid session cookie.
 
 ## Search API
 
-- `GET /search/messages?q=<term>&limit=20` (session required)
+- `GET /search/messages?q=<term>&channelId=&fromUserId=&before=&after=&offset=0&limit=20` (session required)
+- `before` and `after` accept ISO 8601 timestamps
+- Response metadata includes `count`, `total`, `offset`, `limit`, `nextOffset`, and `hasMore`
 
 ## Attachments API
 
@@ -239,7 +241,7 @@ Implemented:
 - Optional Postgres-backed persistence (`STORE_DRIVER=postgres`)
 - Database migrations (`001_init.sql`, `002_auth.sql`, `003_channel_acl.sql`, `004_direct_messages.sql`, `005_threads_mentions.sql`, `006_attachments.sql`, `007_bot_users.sql`)
 - Realtime WebSocket sync with authenticated user binding
-- Basic server-side message search endpoint
+- Paginated/filterable message search endpoint with ACL-safe filtering
 - Readiness endpoint with store/Redis dependency checks (`GET /ready`)
 - Prometheus-compatible metrics endpoint (`GET /metrics`)
 - Manual retention maintenance endpoint with audit trail (`POST /admin/maintenance/retention-run`)
@@ -251,6 +253,7 @@ Implemented:
 - Redis-backed realtime coordination for websocket message broadcast, typing, and presence when `REDIS_URL` is set
 - Audit export now supports JSON/CSV plus filters (`action`, `actorId`, `since`, `until`) and pagination (`offset`, `limit`)
 - `/metrics` added with in-process HTTP/auth/rate-limit counters
+- Search v2 added with pagination metadata and filters (`channelId`, `fromUserId`, `before`, `after`, `offset`, `limit`)
 - Retention sweep operation added for admin maintenance
 - Attachment v1 shipped:
   - message attachments in shared contracts/bootstrap payloads

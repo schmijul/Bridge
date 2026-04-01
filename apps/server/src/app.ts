@@ -28,6 +28,7 @@ import {
   getDirectConversationsForUser,
   getAdminOverview,
   getMessagesForUser,
+  searchMessagesForUser,
   getUnreadCountsForUser,
   isPersistenceEnabled,
   nextSequence,
@@ -1115,33 +1116,61 @@ export async function createBridgeApp(
     }
 
     const querySchema = z.object({
-      q: z.string().trim().min(2).max(120),
+      q: z.string().trim().min(1).max(120).optional(),
+      channelId: z.string().trim().min(1).optional(),
+      fromUserId: z.string().trim().min(1).optional(),
+      before: z.string().datetime().optional(),
+      after: z.string().datetime().optional(),
+      offset: z.coerce.number().int().min(0).max(5000).default(0),
       limit: z.coerce.number().int().min(1).max(100).default(20)
     });
     const parsed = querySchema.safeParse(request.query);
     if (!parsed.success) {
       return reply.code(400).send({ message: "invalid search query" });
     }
+    const hasSearchTerm =
+      Boolean(parsed.data.q?.trim()) ||
+      Boolean(parsed.data.channelId) ||
+      Boolean(parsed.data.fromUserId) ||
+      Boolean(parsed.data.before) ||
+      Boolean(parsed.data.after);
+    if (!hasSearchTerm) {
+      return reply.code(400).send({ message: "invalid search query" });
+    }
 
-    const q = parsed.data.q.toLowerCase();
-    const results = messages
-      .filter((message) => isUserAllowedInChannel(auth.actorId, message.channelId))
-      .filter((message) => message.content.toLowerCase().includes(q))
-      .slice(-parsed.data.limit)
-      .reverse()
-      .map((message) => {
-        const sender = getUserById(message.senderId);
-        const channel = channels.find((entry) => entry.id === message.channelId);
-        return {
-          ...message,
-          senderDisplayName: sender?.displayName ?? message.senderId,
-          channelName: channel?.name ?? "unknown"
-        };
-      });
+    const search = searchMessagesForUser(auth.actorId, {
+      q: parsed.data.q,
+      channelId: parsed.data.channelId,
+      fromUserId: parsed.data.fromUserId,
+      before: parsed.data.before,
+      after: parsed.data.after,
+      offset: parsed.data.offset,
+      limit: parsed.data.limit
+    });
+    const results = search.messages.map((message) => {
+      const sender = getUserById(message.senderId);
+      const channel = channels.find((entry) => entry.id === message.channelId);
+      return {
+        ...message,
+        senderDisplayName: sender?.displayName ?? message.senderId,
+        channelName: channel?.name ?? "unknown"
+      };
+    });
 
     return {
-      query: parsed.data.q,
-      count: results.length,
+      query: parsed.data.q ?? null,
+      filters: {
+        channelId: parsed.data.channelId ?? null,
+        fromUserId: parsed.data.fromUserId ?? null,
+        before: parsed.data.before ?? null,
+        after: parsed.data.after ?? null
+      },
+      offset: search.offset,
+      limit: search.limit,
+      count: search.count,
+      total: search.total,
+      nextOffset: search.nextOffset,
+      hasMore: search.nextOffset !== null,
       results
     };
   });
