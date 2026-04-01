@@ -60,6 +60,10 @@ import {
   safeFilename
 } from "./attachments.js";
 import {
+  createEncryptedAttachmentStorage,
+  parseAttachmentEncryptionConfig
+} from "./attachment-encryption.js";
+import {
   createSession,
   deleteSession,
   deleteSessionsForUser,
@@ -582,7 +586,11 @@ export async function createBridgeApp(
     member: parseGroupSet(options?.auth?.roleGroups?.member ?? process.env.OIDC_ROLE_GROUP_MEMBER),
     guest: parseGroupSet(options?.auth?.roleGroups?.guest ?? process.env.OIDC_ROLE_GROUP_GUEST)
   };
-  const attachmentStorage = createAttachmentStorage(parseAttachmentStorageConfig(process.env));
+  const attachmentStorageBase = createAttachmentStorage(parseAttachmentStorageConfig(process.env));
+  const attachmentEncryptionConfig = parseAttachmentEncryptionConfig(process.env);
+  const attachmentStorage = attachmentEncryptionConfig
+    ? createEncryptedAttachmentStorage(attachmentStorageBase, attachmentEncryptionConfig)
+    : attachmentStorageBase;
   const attachmentScanner = createAttachmentScanner(parseAttachmentScannerConfig(process.env));
   const attachmentMaxBytes = envNumber("ATTACHMENT_MAX_SIZE_BYTES", 25 * 1024 * 1024);
   const blockedAttachmentExtensions = parseBlockedExtensions(process.env.ATTACHMENT_BLOCKED_EXTENSIONS);
