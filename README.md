@@ -114,7 +114,10 @@ npm run dev:desktop
 - `ATTACHMENT_STORAGE_DRIVER` supports `local` (default), `s3`, or `webdav`
 - `ATTACHMENT_LOCAL_DIR` sets local upload directory for `local` driver
 - `ATTACHMENT_MAX_SIZE_BYTES` sets max upload size in bytes
-- `ATTACHMENT_ENCRYPTION_KEY` enables at-rest encryption for attachments when set; provide a 32-byte key as hex or base64
+- `ATTACHMENT_ENCRYPTION_PRIMARY_KEY` enables at-rest encryption for attachments when set; provide a 32-byte key as hex or base64
+- `ATTACHMENT_ENCRYPTION_PRIMARY_KEY_ID` labels the primary encryption key in the envelope metadata; defaults to `primary`
+- `ATTACHMENT_ENCRYPTION_FALLBACK_KEYS` is a comma-separated list of `keyId=key` entries used to decrypt older attachments
+- `ATTACHMENT_ENCRYPTION_KEY` remains accepted as a legacy single-key alias for backwards compatibility
 - `ATTACHMENT_SCAN_MODE` supports `none` (default) or `command`
 - `ATTACHMENT_SCAN_COMMAND` is required for `ATTACHMENT_SCAN_MODE=command` and must include `{file}` placeholder (example: `clamscan --no-summary {file}`)
 - `ATTACHMENT_SCAN_TIMEOUT_MS` controls scanner command timeout
@@ -204,7 +207,7 @@ Implemented:
 - Threads/replies with `threadRootMessageId` metadata
 - Mentions metadata extraction on message send (`mentionUserIds`)
 - Attachment uploads with pending queue, message binding, ACL-protected download, and retention/moderation cleanup
-- Optional AES-256-GCM at-rest encryption for attachment payloads via `ATTACHMENT_ENCRYPTION_KEY`
+- Optional AES-256-GCM at-rest encryption for attachment payloads via primary/fallback rotation keys
 - Bot users with one-time API tokens and bearer-authenticated bot message posting
 - Minimal Electron desktop shell for the existing web app
 - Unread counters endpoint and server-side read-state tracking (`GET /me/unread`)
@@ -227,7 +230,7 @@ Implemented:
 - Attachment v1 shipped:
   - message attachments in shared contracts/bootstrap payloads
   - upload endpoint with size and extension policy enforcement
-  - optional AES-256-GCM at-rest encryption for attachment payloads via `ATTACHMENT_ENCRYPTION_KEY`
+  - optional AES-256-GCM at-rest encryption for attachment payloads via primary/fallback rotation keys
   - optional scanner hook (`ATTACHMENT_SCAN_MODE=command`) for AV command integration
   - local and S3-compatible storage drivers
   - Nextcloud-compatible WebDAV storage driver
@@ -255,7 +258,7 @@ Still required for production replacement:
 - Mobile client, desktop native features, and notification strategy
 - Scanner hardening for attachments (production ClamAV deployment pattern, health checks, and signature update runbook)
 - Nextcloud/WebDAV production hardening notes and credentials rotation guidance for attachment storage
-- Key rotation and envelope migration plan for attachment encryption
+- Secret-manager-backed key source and automated re-encryption tooling for attachment encryption
 
 ## Validation Pipeline
 
