@@ -182,6 +182,14 @@ Admin endpoints are protected by role and require a valid session cookie.
 - `POST /auth/logout`
 - `POST /bots/messages` posts as a bot using `Authorization: Bearer <token>`
 
+## Notifications API
+
+- `GET /notifications?limit=20&offset=0&unreadOnly=false` (session required)
+- `POST /notifications/read` with `{ all?: boolean, notificationIds?: string[] }` (session required)
+- `GET /notifications/preferences` (session required)
+- `PATCH /notifications/preferences` with `{ mentionEnabled?, directMessageEnabled? }` (session required)
+- Notifications currently cover in-app mention and direct-message activity only; push delivery is still an open follow-up
+
 ## Readiness API
 
 - `GET /ready` returns dependency readiness for store and Redis with `200` when ready and `503` when required dependencies are unhealthy
@@ -237,19 +245,20 @@ Implemented:
 - Attachment uploads with pending queue, message binding, ACL-protected download, and retention/moderation cleanup
 - Optional AES-256-GCM at-rest encryption for attachment payloads via primary/fallback rotation keys
 - Bot users with one-time API tokens, bearer-authenticated bot message posting, and admin token rotation/revocation
+- Notification foundation for mention and direct-message activity, with read/unread tracking and user preferences
 - Minimal Electron desktop shell for the existing web app
 - Minimal Expo mobile shell for auth/bootstrap/channel browsing
 - Unread counters endpoint and server-side read-state tracking (`GET /me/unread`)
 - Auth/API boundary rate limiting and brute-force protections (`429` + `retry-after`)
 - Optional Postgres-backed persistence (`STORE_DRIVER=postgres`)
-- Database migrations (`001_init.sql`, `002_auth.sql`, `003_channel_acl.sql`, `004_direct_messages.sql`, `005_threads_mentions.sql`, `006_attachments.sql`, `007_bot_users.sql`)
+- Database migrations (`001_init.sql`, `002_auth.sql`, `003_channel_acl.sql`, `004_direct_messages.sql`, `005_threads_mentions.sql`, `006_attachments.sql`, `007_bot_users.sql`, `008_notifications.sql`)
 - Realtime WebSocket sync with authenticated user binding
 - Paginated/filterable message search endpoint with ACL-safe filtering
 - Readiness endpoint with store/Redis dependency checks (`GET /ready`)
 - Prometheus-compatible metrics endpoint (`GET /metrics`)
 - Manual retention maintenance endpoint with audit trail (`POST /admin/maintenance/retention-run`)
 
-### Recently Delivered (2026-03-31)
+### Recently Delivered (2026-04-01)
 
 - OIDC mode wiring (`/auth/mode`, `/auth/oidc/login`) plus security/session hardening updates
 - `/ready` now reports real store + Redis health instead of Redis placeholder status
@@ -258,6 +267,10 @@ Implemented:
 - `/metrics` added with in-process HTTP/auth/rate-limit counters
 - Search v2 added with pagination metadata and filters (`channelId`, `fromUserId`, `before`, `after`, `offset`, `limit`)
 - Retention sweep operation added for admin maintenance
+- Notification foundation shipped:
+  - mention and direct-message notification records
+  - authenticated list/read APIs for notifications
+  - notification preference storage and update API
 - Attachment v1 shipped:
   - message attachments in shared contracts/bootstrap payloads
   - upload endpoint with size and extension policy enforcement
@@ -292,7 +305,7 @@ Still required for production replacement:
 - Observability expansion beyond counters (`/metrics` exists): tracing, log correlation, dashboards, alert routing
 - Backup/restore automation with restore verification in CI/staging
 - Mattermost migration tooling (users/channels and optional history)
-- Mobile native features, desktop native features, and notification strategy
+- Mobile native features, desktop native features, and push notification delivery strategy
 - Scanner hardening for attachments (production ClamAV deployment pattern, health checks, and signature update runbook)
 - Nextcloud/WebDAV production hardening notes and credentials rotation guidance for attachment storage
 - Secret-manager-backed key source and automated re-encryption tooling for attachment encryption

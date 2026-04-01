@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import type { ClientEvent, ServerEvent } from "@bridge/shared";
+import type { ClientEvent, ServerEvent, User } from "@bridge/shared";
 import { getDbPool } from "./db.js";
 import {
   addMessage,
@@ -27,6 +27,8 @@ import {
   getChannelsForUser,
   getDirectConversationsForUser,
   getAdminOverview,
+  getNotificationPreferencesForUser,
+  getNotificationsForUser,
   getMessagesForUser,
   searchMessagesForUser,
   getUnreadCountsForUser,
@@ -42,6 +44,8 @@ import {
   setPresence,
   setReadState,
   unlinkPendingAttachment,
+  markNotificationsRead,
+  updateNotificationPreferences,
   runRetentionSweep,
   setUserActive,
   typingChanged,
@@ -70,8 +74,10 @@ import {
   createSession,
   deleteSession,
   deleteSessionsForUser,
+  getBotTokenSummary,
   getUserIdFromBotToken,
   getUserIdFromSession,
+  revokeBotTokens,
   setPassword,
   verifyPassword
 } from "./auth.js";
@@ -148,6 +154,10 @@ const createBotSchema = z.object({
   role: z.enum(["admin", "manager", "member", "guest"]).default("member")
 });
 
+const botManagementParamsSchema = z.object({
+  botUserId: z.string().min(1)
+});
+
 const updateUserRoleSchema = z.object({
   role: z.enum(["admin", "manager", "member", "guest"])
 });
@@ -178,6 +188,22 @@ const botMessageSchema = z.object({
   threadRootMessageId: z.string().min(1).optional()
 });
 
+const notificationQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  offset: z.coerce.number().int().min(0).default(0),
+  unreadOnly: z.enum(["true", "false"]).optional()
+});
+
+const notificationReadSchema = z.object({
+  notificationIds: z.array(z.string().uuid()).max(100).optional(),
+  all: z.boolean().optional()
+});
+
+const notificationPreferencesSchema = z.object({
+  mentionEnabled: z.boolean().optional(),
+  directMessageEnabled: z.boolean().optional()
+});
+
 type RateLimitDecision = {
   allowed: boolean;
   retryAfterSeconds: number;
@@ -190,6 +216,18 @@ type OidcRoleGroups = {
   manager: Set<string>;
   member: Set<string>;
   guest: Set<string>;
+};
+
+type BotManagementEntry = {
+  id: string;
+  displayName: string;
+  email: string;
+  role: "admin" | "manager" | "member" | "guest";
+  isActive: boolean;
+  isBot?: boolean;
+  lastSeenAt: string;
+  activeTokenCount: number;
+  lastTokenCreatedAt: string | null;
 };
 
 type CounterMap = Map<string, number>;
@@ -507,6 +545,21 @@ async function requireAuthenticated(
   return { ok: true, actorId };
 }
 
+async function serializeBotUser(botUser: User): Promise<BotManagementEntry> {
+  const summary = await getBotTokenSummary(botUser.id);
+  return {
+    id: botUser.id,
+    displayName: botUser.displayName,
+    email: botUser.email,
+    role: botUser.role,
+    isActive: botUser.isActive,
+    isBot: botUser.isBot ?? true,
+    lastSeenAt: botUser.lastSeenAt,
+    activeTokenCount: summary.activeTokenCount,
+    lastTokenCreatedAt: summary.lastTokenCreatedAt
+  };
+}
+
 export async function createBridgeApp(
   corsOrigin: string,
   options?: {
@@ -693,6 +746,22 @@ export async function createBridgeApp(
       }
     }
   };
+
+  function serializeNotification(notification: ReturnType<typeof getNotificationsForUser>["notifications"][number]) {
+    const actor = getUserById(notification.actorId);
+    const channel = channels.find((entry) => entry.id === notification.channelId);
+    const message = messages.find((entry) => entry.id === notification.messageId);
+    return {
+      ...notification,
+      actorDisplayName: actor?.displayName ?? notification.actorId,
+      actorIsBot: actor?.isBot ?? false,
+      channelName: channel?.name ?? "unknown",
+      channelKind: channel?.kind ?? "channel",
+      messageContent: message?.content ?? null,
+      messageCreatedAt: message?.createdAt ?? null,
+      isUnread: !notification.readAt
+    };
+  }
 
   app.get("/health", async () => {
     let buildMeta: Record<string, unknown> = { note: "build metadata unavailable" };
@@ -1238,6 +1307,110 @@ export async function createBridgeApp(
     };
   });
 
+  app.get("/notifications", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const parsed = notificationQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid notifications query" });
+    }
+
+    const notificationsResult = getNotificationsForUser(auth.actorId, {
+      limit: parsed.data.limit,
+      offset: parsed.data.offset,
+      unreadOnly: parsed.data.unreadOnly === "true"
+    });
+
+    return {
+      limit: parsed.data.limit,
+      offset: parsed.data.offset,
+      unreadOnly: parsed.data.unreadOnly === "true",
+      totalCount: notificationsResult.totalCount,
+      unreadCount: notificationsResult.unreadCount,
+      preferences: getNotificationPreferencesForUser(auth.actorId),
+      notifications: notificationsResult.notifications.map(serializeNotification)
+    };
+  });
+
+  app.post("/notifications/read", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const parsed = notificationReadSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid notification read payload" });
+    }
+    if (!parsed.data.all && (!parsed.data.notificationIds || parsed.data.notificationIds.length === 0)) {
+      return reply.code(400).send({ message: "notificationIds or all=true is required" });
+    }
+
+    const result = markNotificationsRead(
+      auth.actorId,
+      parsed.data.all ? undefined : parsed.data.notificationIds
+    );
+
+    return {
+      ok: true,
+      updatedCount: result.updatedCount,
+      unreadCount: getNotificationsForUser(auth.actorId).unreadCount,
+      notifications: result.notifications.map(serializeNotification)
+    };
+  });
+
+  app.get("/notifications/preferences", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+    return {
+      preferences: getNotificationPreferencesForUser(auth.actorId)
+    };
+  });
+
+  app.patch("/notifications/preferences", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const parsed = notificationPreferencesSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid notification preferences payload" });
+    }
+    if (
+      parsed.data.mentionEnabled === undefined &&
+      parsed.data.directMessageEnabled === undefined
+    ) {
+      return reply.code(400).send({ message: "at least one preference must be provided" });
+    }
+
+    const preferences = updateNotificationPreferences(auth.actorId, parsed.data);
+    return {
+      preferences
+    };
+  });
+
   app.post("/dm/conversations", async (request, reply) => {
     const auth = await requireAuthenticated(request);
     if (!auth.ok) {
@@ -1614,7 +1787,90 @@ export async function createBridgeApp(
     broadcast(botEvent);
     broadcast(auditEvent);
 
-    return reply.code(201).send({ bot: botEvent.payload, token });
+    const bot = await serializeBotUser(botEvent.payload);
+    return reply.code(201).send({ bot, token });
+  });
+
+  app.get("/admin/bots", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const botUsers = users
+      .filter((user) => user.isBot)
+      .slice()
+      .sort((left, right) => left.displayName.localeCompare(right.displayName));
+    const bots = await Promise.all(botUsers.map((botUser) => serializeBotUser(botUser)));
+    return { bots };
+  });
+
+  app.post("/admin/bots/:botUserId/token", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const params = botManagementParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ message: "invalid bot parameter payload" });
+    }
+    const botUser = getUserById(params.data.botUserId);
+    if (!botUser || !botUser.isBot) {
+      return reply.code(404).send({ message: "bot user not found" });
+    }
+
+    const token = await createBotToken(botUser.id, { replaceExisting: true });
+    const auditEvent = appendAuditLog({
+      action: "bot.token.rotated",
+      actorId: auth.actorId,
+      targetType: "user",
+      targetId: botUser.id,
+      summary: `Rotated bot token for ${botUser.displayName}`
+    });
+    broadcast(auditEvent);
+    const bot = await serializeBotUser(botUser);
+    return reply.code(200).send({ bot, token });
+  });
+
+  app.delete("/admin/bots/:botUserId/token", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const params = botManagementParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ message: "invalid bot parameter payload" });
+    }
+    const botUser = getUserById(params.data.botUserId);
+    if (!botUser || !botUser.isBot) {
+      return reply.code(404).send({ message: "bot user not found" });
+    }
+
+    const revokedTokenCount = await revokeBotTokens(botUser.id);
+    const auditEvent = appendAuditLog({
+      action: "bot.token.revoked",
+      actorId: auth.actorId,
+      targetType: "user",
+      targetId: botUser.id,
+      summary: `Revoked ${revokedTokenCount} bot token${revokedTokenCount === 1 ? "" : "s"} for ${botUser.displayName}`
+    });
+    broadcast(auditEvent);
+    const bot = await serializeBotUser(botUser);
+    return { bot, revokedTokenCount };
   });
 
   app.patch("/admin/users/:userId/role", async (request, reply) => {

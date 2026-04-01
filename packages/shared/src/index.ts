@@ -1,5 +1,6 @@
 export type PresenceState = "online" | "away" | "offline";
 export type UserRole = "admin" | "manager" | "member" | "guest";
+export type WorkspaceNotificationType = "mention" | "direct_message";
 
 export interface User {
   id: string;
@@ -46,6 +47,24 @@ export interface Attachment {
   sizeBytes: number;
   status: AttachmentStatus;
   createdAt: string;
+}
+
+export interface WorkspaceNotification {
+  id: string;
+  userId: string;
+  type: WorkspaceNotificationType;
+  actorId: string;
+  channelId: string;
+  messageId: string;
+  readAt?: string;
+  createdAt: string;
+}
+
+export interface WorkspaceNotificationPreferences {
+  userId: string;
+  mentionEnabled: boolean;
+  directMessageEnabled: boolean;
+  updatedAt: string;
 }
 
 export interface ReadState {
