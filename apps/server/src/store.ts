@@ -40,6 +40,7 @@ function makeInitialUsers(now: string): User[] {
       email: "alex@bridge.local",
       role: "admin",
       isActive: true,
+      isBot: false,
       lastSeenAt: now
     },
     {
@@ -48,6 +49,7 @@ function makeInitialUsers(now: string): User[] {
       email: "sam@bridge.local",
       role: "manager",
       isActive: true,
+      isBot: false,
       lastSeenAt: now
     },
     {
@@ -56,6 +58,7 @@ function makeInitialUsers(now: string): User[] {
       email: "nina@bridge.local",
       role: "member",
       isActive: true,
+      isBot: false,
       lastSeenAt: now
     },
     {
@@ -64,6 +67,7 @@ function makeInitialUsers(now: string): User[] {
       email: "jordan@bridge.local",
       role: "member",
       isActive: true,
+      isBot: false,
       lastSeenAt: now
     }
   ];
@@ -334,6 +338,7 @@ async function seedDatabaseFromMemory(): Promise<void> {
     await db.query("DELETE FROM messages");
     await db.query("DELETE FROM audit_log");
     await db.query("DELETE FROM channels");
+    await db.query("DELETE FROM bot_api_tokens");
     await db.query("DELETE FROM users");
     await db.query("DELETE FROM workspaces");
 
@@ -351,9 +356,9 @@ async function seedDatabaseFromMemory(): Promise<void> {
 
     for (const user of users) {
       await db.query(
-        `INSERT INTO users (id, display_name, email, role, is_active, last_seen_at)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [user.id, user.displayName, user.email, user.role, user.isActive, user.lastSeenAt]
+        `INSERT INTO users (id, display_name, email, role, is_active, last_seen_at, is_bot)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [user.id, user.displayName, user.email, user.role, user.isActive, user.lastSeenAt, user.isBot ?? false]
       );
     }
 
@@ -494,6 +499,7 @@ async function loadStoreFromDatabase(): Promise<boolean> {
     email: string;
     role: UserRole;
     is_active: boolean;
+    is_bot: boolean;
     last_seen_at: Date | string;
   }>("SELECT * FROM users ORDER BY display_name ASC");
   users.splice(
@@ -505,6 +511,7 @@ async function loadStoreFromDatabase(): Promise<boolean> {
       email: row.email,
       role: row.role,
       isActive: row.is_active,
+      isBot: row.is_bot,
       lastSeenAt: new Date(row.last_seen_at).toISOString()
     }))
   );
@@ -1248,6 +1255,7 @@ export function inviteUser(input: {
   displayName: string;
   email: string;
   role: UserRole;
+  isBot?: boolean;
 }): ServerEvent {
   const user: User = {
     id: `u-${randomUUID()}`,
@@ -1255,6 +1263,7 @@ export function inviteUser(input: {
     email: input.email,
     role: input.role,
     isActive: true,
+    isBot: input.isBot ?? false,
     lastSeenAt: new Date().toISOString()
   };
   users.push(user);
@@ -1262,9 +1271,9 @@ export function inviteUser(input: {
   enqueuePersist(async () => {
     const db = getDbPool();
     await db.query(
-      `INSERT INTO users (id, display_name, email, role, is_active, last_seen_at)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [user.id, user.displayName, user.email, user.role, user.isActive, user.lastSeenAt]
+      `INSERT INTO users (id, display_name, email, role, is_active, last_seen_at, is_bot)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [user.id, user.displayName, user.email, user.role, user.isActive, user.lastSeenAt, user.isBot ?? false]
     );
   });
 
@@ -1272,6 +1281,30 @@ export function inviteUser(input: {
     type: "user:updated",
     payload: { ...user, sequence: nextSequenceInternal() }
   };
+}
+
+function generateBotEmail(displayName: string): string {
+  const localPart = displayName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .slice(0, 32);
+  const suffix = randomUUID().slice(0, 8);
+  return `${localPart || "bot"}.${suffix}@bridge-bots.local`;
+}
+
+export function createBotUser(input: {
+  displayName: string;
+  email?: string;
+  role?: UserRole;
+}): ServerEvent {
+  return inviteUser({
+    displayName: input.displayName,
+    email: input.email ?? generateBotEmail(input.displayName),
+    role: input.role ?? "member",
+    isBot: true
+  });
 }
 
 export function updateUserRole(userId: string, role: UserRole): ServerEvent | null {

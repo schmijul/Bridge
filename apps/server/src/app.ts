@@ -14,6 +14,7 @@ import {
   addMessage,
   appendAuditLog,
   archiveChannel,
+  createBotUser,
   createPendingAttachment,
   addChannelMember,
   channels,
@@ -60,9 +61,11 @@ import {
   safeFilename
 } from "./attachments.js";
 import {
+  createBotToken,
   createSession,
   deleteSession,
   deleteSessionsForUser,
+  getUserIdFromBotToken,
   getUserIdFromSession,
   setPassword,
   verifyPassword
@@ -134,6 +137,12 @@ const inviteUserSchema = z.object({
   role: z.enum(["admin", "manager", "member", "guest"])
 });
 
+const createBotSchema = z.object({
+  displayName: z.string().trim().min(2).max(60),
+  email: z.string().trim().email().optional(),
+  role: z.enum(["admin", "manager", "member", "guest"]).default("member")
+});
+
 const updateUserRoleSchema = z.object({
   role: z.enum(["admin", "manager", "member", "guest"])
 });
@@ -156,6 +165,12 @@ const loginSchema = z.object({
 
 const createConversationSchema = z.object({
   participantUserIds: z.array(z.string().trim().min(1)).min(1).max(11)
+});
+
+const botMessageSchema = z.object({
+  channelId: z.string().min(1),
+  content: z.string().trim().min(1).max(4000),
+  threadRootMessageId: z.string().min(1).optional()
 });
 
 type RateLimitDecision = {
@@ -426,6 +441,17 @@ function sessionIdFromCookie(cookieHeader: unknown): string | undefined {
   }
   const value = rawCookie.slice("bridge_session=".length);
   return value.length > 0 ? value : undefined;
+}
+
+function bearerTokenFromAuthorizationHeader(authorization: unknown): string | undefined {
+  if (typeof authorization !== "string") {
+    return undefined;
+  }
+  const [scheme, token] = authorization.trim().split(/\s+/, 2);
+  if (scheme?.toLowerCase() !== "bearer" || !token) {
+    return undefined;
+  }
+  return token.trim().length > 0 ? token.trim() : undefined;
 }
 
 function extractMentionUserIds(content: string): string[] {
@@ -1545,6 +1571,46 @@ export async function createBridgeApp(
     return reply.code(201).send({ user: userEvent.payload });
   });
 
+  app.post("/admin/bots", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const parsed = createBotSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid bot payload" });
+    }
+
+    const requestedEmail = parsed.data.email?.toLowerCase();
+    if (requestedEmail && users.some((user) => user.email.toLowerCase() === requestedEmail)) {
+      return reply.code(409).send({ message: "email already exists" });
+    }
+
+    const botEvent = createBotUser(parsed.data);
+    if (botEvent.type !== "user:updated") {
+      return reply.code(500).send({ message: "unexpected bot event type" });
+    }
+    const token = await createBotToken(botEvent.payload.id);
+
+    const auditEvent = appendAuditLog({
+      action: "bot.created",
+      actorId: auth.actorId,
+      targetType: "user",
+      targetId: botEvent.payload.id,
+      summary: `Created bot ${botEvent.payload.displayName} as ${botEvent.payload.role}`
+    });
+
+    broadcast(botEvent);
+    broadcast(auditEvent);
+
+    return reply.code(201).send({ bot: botEvent.payload, token });
+  });
+
   app.patch("/admin/users/:userId/role", async (request, reply) => {
     const auth = await requireAdmin(request);
     if (!auth.ok) {
@@ -1621,6 +1687,69 @@ export async function createBridgeApp(
     broadcast(auditEvent);
 
     return { user: userEvent.payload };
+  });
+
+  app.post("/bots/messages", async (request, reply) => {
+    const token = bearerTokenFromAuthorizationHeader(request.headers.authorization);
+    if (!token) {
+      return reply.code(401).send({ message: "missing bearer token" });
+    }
+
+    const botUserId = await getUserIdFromBotToken(token);
+    if (!botUserId) {
+      return reply.code(401).send({ message: "invalid bot token" });
+    }
+
+    const botUser = getUserById(botUserId);
+    if (!botUser || !botUser.isActive || !botUser.isBot) {
+      return reply.code(401).send({ message: "invalid bot token" });
+    }
+
+    const limited = enforceApiRateLimit(request, reply, botUser.id);
+    if (limited) {
+      return limited;
+    }
+
+    const parsed = botMessageSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid bot message payload" });
+    }
+
+    const channel = channels.find(
+      (candidate) => candidate.id === parsed.data.channelId && !candidate.archivedAt
+    );
+    if (!channel) {
+      return reply.code(404).send({ message: "channel not found" });
+    }
+    if (!isUserAllowedInChannel(botUser.id, channel.id)) {
+      return reply.code(403).send({ message: "forbidden channel access" });
+    }
+    if (parsed.data.threadRootMessageId) {
+      const root = messages.find((message) => message.id === parsed.data.threadRootMessageId);
+      if (!root || root.channelId !== channel.id) {
+        return reply.code(404).send({ message: "thread root message not found in channel" });
+      }
+    }
+
+    const messageEvent = addMessage(channel.id, botUser.id, parsed.data.content, {
+      threadRootMessageId: parsed.data.threadRootMessageId,
+      mentionUserIds: extractMentionUserIds(parsed.data.content)
+    });
+    if (messageEvent.type !== "message:new") {
+      return reply.code(500).send({ message: "unexpected message event type" });
+    }
+    const auditEvent = appendAuditLog({
+      action: "bot.message.posted",
+      actorId: botUser.id,
+      targetType: "message",
+      targetId: messageEvent.payload.id,
+      summary: `Bot ${botUser.displayName} posted in #${channel.name}`
+    });
+
+    broadcast(messageEvent);
+    broadcast(auditEvent);
+
+    return reply.code(201).send({ message: messageEvent.payload });
   });
 
   app.patch("/admin/settings", async (request, reply) => {
