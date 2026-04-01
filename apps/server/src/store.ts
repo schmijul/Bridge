@@ -22,6 +22,25 @@ export type AttachmentRecord = Attachment & {
   storageKey: string;
 };
 
+export type MessageSearchOptions = {
+  q?: string;
+  channelId?: string;
+  fromUserId?: string;
+  before?: string;
+  after?: string;
+  offset?: number;
+  limit?: number;
+};
+
+export type MessageSearchResult = {
+  total: number;
+  offset: number;
+  limit: number;
+  count: number;
+  nextOffset: number | null;
+  messages: Message[];
+};
+
 const initialWorkspace: Workspace = {
   id: workspaceId,
   settings: {
@@ -749,7 +768,81 @@ export function getChannelsForUser(userId: string): Channel[] {
 }
 
 export function getMessagesForUser(userId: string): Message[] {
+  return getVisibleMessagesForUser(userId);
+}
+
+function getVisibleMessagesForUser(userId: string): Message[] {
   return messages.filter((message) => isUserAllowedInChannel(userId, message.channelId));
+}
+
+function compareMessagesForSearch(left: Message, right: Message): number {
+  const leftTime = new Date(left.createdAt).getTime();
+  const rightTime = new Date(right.createdAt).getTime();
+  if (leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+  return right.id.localeCompare(left.id);
+}
+
+function normalizeSearchTerm(raw: string | undefined): string | null {
+  const normalized = raw?.trim().toLowerCase() ?? "";
+  return normalized.length > 0 ? normalized : null;
+}
+
+function toTimestamp(value: string | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function searchMessagesForUser(
+  userId: string,
+  options: MessageSearchOptions
+): MessageSearchResult {
+  const q = normalizeSearchTerm(options.q);
+  const offset = options.offset ?? 0;
+  const limit = options.limit ?? 20;
+  const channelId = options.channelId?.trim() ?? "";
+  const fromUserId = options.fromUserId?.trim() ?? "";
+  const before = toTimestamp(options.before);
+  const after = toTimestamp(options.after);
+
+  const filtered = getVisibleMessagesForUser(userId)
+    .filter((message) => {
+      if (q && !message.content.toLowerCase().includes(q)) {
+        return false;
+      }
+      if (channelId && message.channelId !== channelId) {
+        return false;
+      }
+      if (fromUserId && message.senderId !== fromUserId) {
+        return false;
+      }
+      const createdAt = new Date(message.createdAt).getTime();
+      if (before !== null && !(createdAt < before)) {
+        return false;
+      }
+      if (after !== null && !(createdAt > after)) {
+        return false;
+      }
+      return true;
+    })
+    .sort(compareMessagesForSearch);
+
+  const total = filtered.length;
+  const page = filtered.slice(offset, offset + limit);
+  const nextOffset = offset + page.length < total ? offset + page.length : null;
+
+  return {
+    total,
+    offset,
+    limit,
+    count: page.length,
+    nextOffset,
+    messages: page
+  };
 }
 
 export function getAttachmentById(attachmentId: string): AttachmentRecord | undefined {
