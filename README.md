@@ -26,7 +26,7 @@ Screenshots below were refreshed for the current session-based login flow.
 
 ![Bridge Admin Board](imgs/admin-board.png)
 
-The Admin Board includes workspace governance and security controls (for example guest access and MFA enforcement policy toggles).
+The Admin Board includes workspace governance, security controls, and bot lifecycle management (for example guest access, MFA enforcement policy toggles, and bot token rotation/revocation).
 
 ## Stack
 
@@ -46,7 +46,7 @@ The Admin Board includes workspace governance and security controls (for example
 - Admin board for:
   - onboarding/invite users
   - role management (`admin`, `manager`, `member`, `guest`)
-  - bot provisioning and API token issuance
+  - bot provisioning, token issuance, rotation and revocation
   - channel lifecycle management (create/archive)
   - workspace security/governance settings
   - message moderation and audit log
@@ -162,7 +162,10 @@ Admin endpoints are protected by role and require a valid session cookie.
 - `POST /admin/channels/:channelId/members`
 - `DELETE /admin/channels/:channelId/members/:userId`
 - `POST /admin/users`
+- `GET /admin/bots`
 - `POST /admin/bots` creates an API-capable bot user and returns a one-time bearer token
+- `POST /admin/bots/:botUserId/token` rotates a bot token and returns a new one-time bearer token
+- `DELETE /admin/bots/:botUserId/token` revokes active bot tokens
 - `PATCH /admin/users/:userId/role`
 - `PATCH /admin/users/:userId/status`
 - `PATCH /admin/settings`
@@ -178,6 +181,14 @@ Admin endpoints are protected by role and require a valid session cookie.
 - `GET /auth/mode`
 - `POST /auth/logout`
 - `POST /bots/messages` posts as a bot using `Authorization: Bearer <token>`
+
+## Notifications API
+
+- `GET /notifications?limit=20&offset=0&unreadOnly=false` (session required)
+- `POST /notifications/read` with `{ all?: boolean, notificationIds?: string[] }` (session required)
+- `GET /notifications/preferences` (session required)
+- `PATCH /notifications/preferences` with `{ mentionEnabled?, directMessageEnabled? }` (session required)
+- Notifications currently cover in-app mention and direct-message activity only; push delivery is still an open follow-up
 
 ## Readiness API
 
@@ -231,20 +242,22 @@ Implemented:
 - Mentions metadata extraction on message send (`mentionUserIds`)
 - Attachment uploads with pending queue, message binding, ACL-protected download, and retention/moderation cleanup
 - Optional AES-256-GCM at-rest encryption for attachment payloads via primary/fallback rotation keys
-- Bot users with one-time API tokens and bearer-authenticated bot message posting
+- Bot users with one-time API tokens, bearer-authenticated bot message posting, and admin token rotation/revocation
+- Notification foundation for mention and direct-message activity, with read/unread tracking and user preferences
 - Minimal Electron desktop shell for the existing web app
 - Minimal Expo mobile shell for auth/bootstrap/channel browsing
 - Unread counters endpoint and server-side read-state tracking (`GET /me/unread`)
+- Notification foundation with mention/DM delivery, read-state, and preferences
 - Auth/API boundary rate limiting and brute-force protections (`429` + `retry-after`)
 - Optional Postgres-backed persistence (`STORE_DRIVER=postgres`)
-- Database migrations (`001_init.sql`, `002_auth.sql`, `003_channel_acl.sql`, `004_direct_messages.sql`, `005_threads_mentions.sql`, `006_attachments.sql`, `007_bot_users.sql`)
+- Database migrations (`001_init.sql`, `002_auth.sql`, `003_channel_acl.sql`, `004_direct_messages.sql`, `005_threads_mentions.sql`, `006_attachments.sql`, `007_bot_users.sql`, `008_notifications.sql`)
 - Realtime WebSocket sync with authenticated user binding
 - Basic server-side message search endpoint
 - Readiness endpoint with store/Redis dependency checks (`GET /ready`)
 - Prometheus-compatible metrics endpoint (`GET /metrics`)
 - Manual retention maintenance endpoint with audit trail (`POST /admin/maintenance/retention-run`)
 
-### Recently Delivered (2026-03-31)
+### Recently Delivered (2026-04-01)
 
 - OIDC mode wiring (`/auth/mode`, `/auth/oidc/login`) plus security/session hardening updates
 - `/ready` now reports real store + Redis health instead of Redis placeholder status
@@ -252,6 +265,10 @@ Implemented:
 - Audit export now supports JSON/CSV plus filters (`action`, `actorId`, `since`, `until`) and pagination (`offset`, `limit`)
 - `/metrics` added with in-process HTTP/auth/rate-limit counters
 - Retention sweep operation added for admin maintenance
+- Notification foundation shipped:
+  - mention and direct-message notification records
+  - authenticated list/read APIs for notifications
+  - notification preference storage and update API
 - Attachment v1 shipped:
   - message attachments in shared contracts/bootstrap payloads
   - upload endpoint with size and extension policy enforcement
@@ -266,6 +283,9 @@ Implemented:
   - `POST /admin/bots` provisions a bot user and returns a one-time bearer token
   - `POST /bots/messages` lets bots post into channels with normal ACL checks
   - bot access tokens are stored hashed in the database
+  - `GET /admin/bots` lists bot users with active token summaries
+  - `POST /admin/bots/:botUserId/token` rotates a bot token and shows the new value once
+  - `DELETE /admin/bots/:botUserId/token` revokes active bot tokens
 - Desktop shell shipped:
   - Electron host app in `apps/desktop`
   - secure `BrowserWindow` defaults
@@ -283,7 +303,7 @@ Still required for production replacement:
 - Observability expansion beyond counters (`/metrics` exists): tracing, log correlation, dashboards, alert routing
 - Backup/restore automation with restore verification in CI/staging
 - Mattermost migration tooling (users/channels and optional history)
-- Mobile native features, desktop native features, and notification strategy
+- Mobile native features, desktop native features, and push notification delivery strategy
 - Scanner hardening for attachments (production ClamAV deployment pattern, health checks, and signature update runbook)
 - Nextcloud/WebDAV production hardening notes and credentials rotation guidance for attachment storage
 - Secret-manager-backed key source and automated re-encryption tooling for attachment encryption

@@ -42,7 +42,8 @@ export async function runMigrations(): Promise<void> {
     "004_direct_messages.sql",
     "005_threads_mentions.sql",
     "006_attachments.sql",
-    "007_bot_users.sql"
+    "007_bot_users.sql",
+    "008_notifications.sql"
   ];
   const db = getDbPool();
   await db.query(`
