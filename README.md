@@ -26,7 +26,7 @@ Screenshots below were refreshed for the current session-based login flow.
 
 ![Bridge Admin Board](imgs/admin-board.png)
 
-The Admin Board includes workspace governance and security controls (for example guest access and MFA enforcement policy toggles).
+The Admin Board includes workspace governance, security controls, and bot lifecycle management (for example guest access, MFA enforcement policy toggles, and bot token rotation/revocation).
 
 ## Stack
 
@@ -46,7 +46,7 @@ The Admin Board includes workspace governance and security controls (for example
 - Admin board for:
   - onboarding/invite users
   - role management (`admin`, `manager`, `member`, `guest`)
-  - bot provisioning and API token issuance
+  - bot provisioning, token issuance, rotation and revocation
   - channel lifecycle management (create/archive)
   - workspace security/governance settings
   - message moderation and audit log
@@ -162,7 +162,10 @@ Admin endpoints are protected by role and require a valid session cookie.
 - `POST /admin/channels/:channelId/members`
 - `DELETE /admin/channels/:channelId/members/:userId`
 - `POST /admin/users`
+- `GET /admin/bots`
 - `POST /admin/bots` creates an API-capable bot user and returns a one-time bearer token
+- `POST /admin/bots/:botUserId/token` rotates a bot token and returns a new one-time bearer token
+- `DELETE /admin/bots/:botUserId/token` revokes active bot tokens
 - `PATCH /admin/users/:userId/role`
 - `PATCH /admin/users/:userId/status`
 - `PATCH /admin/settings`
@@ -231,7 +234,7 @@ Implemented:
 - Mentions metadata extraction on message send (`mentionUserIds`)
 - Attachment uploads with pending queue, message binding, ACL-protected download, and retention/moderation cleanup
 - Optional AES-256-GCM at-rest encryption for attachment payloads via primary/fallback rotation keys
-- Bot users with one-time API tokens and bearer-authenticated bot message posting
+- Bot users with one-time API tokens, bearer-authenticated bot message posting, and admin token rotation/revocation
 - Minimal Electron desktop shell for the existing web app
 - Minimal Expo mobile shell for auth/bootstrap/channel browsing
 - Unread counters endpoint and server-side read-state tracking (`GET /me/unread`)
@@ -266,6 +269,9 @@ Implemented:
   - `POST /admin/bots` provisions a bot user and returns a one-time bearer token
   - `POST /bots/messages` lets bots post into channels with normal ACL checks
   - bot access tokens are stored hashed in the database
+  - `GET /admin/bots` lists bot users with active token summaries
+  - `POST /admin/bots/:botUserId/token` rotates a bot token and shows the new value once
+  - `DELETE /admin/bots/:botUserId/token` revokes active bot tokens
 - Desktop shell shipped:
   - Electron host app in `apps/desktop`
   - secure `BrowserWindow` defaults
