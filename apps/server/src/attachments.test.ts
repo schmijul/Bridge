@@ -40,6 +40,9 @@ async function makeApp(
     scanMode?: "none" | "command";
     scanCommand?: string;
     encryptionKey?: string;
+    encryptionPrimaryKey?: string;
+    encryptionPrimaryKeyId?: string;
+    encryptionFallbackKeys?: string;
   }
 ) {
   resetStore();
@@ -47,6 +50,21 @@ async function makeApp(
   const uploadDir = join(process.cwd(), `.bridge_uploads_test_${suffix}`);
   process.env.ATTACHMENT_STORAGE_DRIVER = "local";
   process.env.ATTACHMENT_LOCAL_DIR = uploadDir;
+  if (options?.encryptionPrimaryKey) {
+    process.env.ATTACHMENT_ENCRYPTION_PRIMARY_KEY = options.encryptionPrimaryKey;
+  } else {
+    delete process.env.ATTACHMENT_ENCRYPTION_PRIMARY_KEY;
+  }
+  if (options?.encryptionPrimaryKeyId) {
+    process.env.ATTACHMENT_ENCRYPTION_PRIMARY_KEY_ID = options.encryptionPrimaryKeyId;
+  } else {
+    delete process.env.ATTACHMENT_ENCRYPTION_PRIMARY_KEY_ID;
+  }
+  if (options?.encryptionFallbackKeys) {
+    process.env.ATTACHMENT_ENCRYPTION_FALLBACK_KEYS = options.encryptionFallbackKeys;
+  } else {
+    delete process.env.ATTACHMENT_ENCRYPTION_FALLBACK_KEYS;
+  }
   if (options?.encryptionKey) {
     process.env.ATTACHMENT_ENCRYPTION_KEY = options.encryptionKey;
   } else {
@@ -159,7 +177,8 @@ test("uploaded attachment can be linked into a message and downloaded", async (t
 
 test("encrypted attachment storage still works end to end", async (t) => {
   const { app, uploadDir } = await makeApp("encrypted", {
-    encryptionKey: Buffer.alloc(32, 19).toString("hex")
+    encryptionPrimaryKey: Buffer.alloc(32, 19).toString("hex"),
+    encryptionPrimaryKeyId: "2026-04"
   });
   t.after(async () => {
     await app.close();
