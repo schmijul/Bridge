@@ -34,6 +34,7 @@ The Admin Board includes workspace governance and security controls (for example
 - `apps/server`: Fastify + WebSocket real-time sync API
 - `apps/web`: React + Vite client
 - `apps/desktop`: Electron shell that loads the web app in a hardened window
+- `apps/mobile`: Expo / React Native shell for mobile auth and chat browsing
 - `packages/shared`: shared event/types contracts
 - Docker Compose for local Postgres + Redis dependencies
 - Git metadata stamping in builds and runtime
@@ -60,6 +61,7 @@ The Admin Board includes workspace governance and security controls (for example
    ```bash
    cp apps/server/.env.example apps/server/.env
    cp apps/web/.env.example apps/web/.env
+   cp apps/mobile/.env.example apps/mobile/.env
    ```
 3. Start infra (optional for current in-memory MVP):
    ```bash
@@ -77,11 +79,16 @@ The Admin Board includes workspace governance and security controls (for example
    ```bash
    npm run dev:desktop
    ```
+7. Optional mobile shell:
+   ```bash
+   npm run dev:mobile
+   ```
 
 - Web: http://localhost:5173
 - API: http://localhost:4000
 - Web now uses session login (`/auth/login`) before entering the workspace
 - Desktop shell loads `BRIDGE_DESKTOP_URL` or defaults to `http://localhost:5173`
+- Mobile shell reads `API_URL` and `WS_URL` from `apps/mobile/.env` or shell environment variables
 
 ## Desktop Shell
 
@@ -95,6 +102,22 @@ Run it with:
 
 ```bash
 npm run dev:desktop
+```
+
+## Mobile Shell
+
+Bridge includes a minimal Expo shell in `apps/mobile`.
+
+- It handles session login against `POST /auth/login`.
+- It loads the current workspace via `GET /bootstrap`.
+- It renders a basic channel list and the messages for the selected channel.
+- `apps/mobile/.env.example` documents the `API_URL` and `WS_URL` variables.
+- For Android emulators, point `API_URL` at `http://10.0.2.2:4000` instead of `http://localhost:4000`.
+
+Run it with:
+
+```bash
+npm run dev:mobile
 ```
 
 ### Server environment
@@ -207,6 +230,7 @@ Implemented:
 - Optional AES-256-GCM at-rest encryption for attachment payloads via `ATTACHMENT_ENCRYPTION_KEY`
 - Bot users with one-time API tokens and bearer-authenticated bot message posting
 - Minimal Electron desktop shell for the existing web app
+- Minimal Expo mobile shell for auth/bootstrap/channel browsing
 - Unread counters endpoint and server-side read-state tracking (`GET /me/unread`)
 - Auth/API boundary rate limiting and brute-force protections (`429` + `retry-after`)
 - Optional Postgres-backed persistence (`STORE_DRIVER=postgres`)
@@ -242,6 +266,10 @@ Implemented:
   - Electron host app in `apps/desktop`
   - secure `BrowserWindow` defaults
   - configurable target URL via `BRIDGE_DESKTOP_URL`
+- Mobile shell shipped:
+  - Expo host app in `apps/mobile`
+  - session login, bootstrap loading, channel list, and message list shell
+  - configurable backend URLs via `API_URL` and `WS_URL`
 
 ## Open Work
 
@@ -252,7 +280,7 @@ Still required for production replacement:
 - Observability expansion beyond counters (`/metrics` exists): tracing, log correlation, dashboards, alert routing
 - Backup/restore automation with restore verification in CI/staging
 - Mattermost migration tooling (users/channels and optional history)
-- Mobile client, desktop native features, and notification strategy
+- Mobile native features, desktop native features, and notification strategy
 - Scanner hardening for attachments (production ClamAV deployment pattern, health checks, and signature update runbook)
 - Nextcloud/WebDAV production hardening notes and credentials rotation guidance for attachment storage
 - Key rotation and envelope migration plan for attachment encryption

@@ -1,0 +1,27 @@
+{
+  "name": "@bridge/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo/AppEntry.js",
+  "description": "Bridge mobile shell built with Expo.",
+  "scripts": {
+    "dev": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "expo": "55.0.9",
+    "expo-constants": "55.0.9",
+    "expo-status-bar": "55.0.4",
+    "react": "19.2.3",
+    "react-native": "0.84.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.10",
+    "babel-preset-expo": "55.0.13",
+    "typescript": "^5.7.3"
+  }
+}
