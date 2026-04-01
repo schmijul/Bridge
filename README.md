@@ -33,6 +33,7 @@ The Admin Board includes workspace governance and security controls (for example
 - TypeScript monorepo (`npm` workspaces)
 - `apps/server`: Fastify + WebSocket real-time sync API
 - `apps/web`: React + Vite client
+- `apps/desktop`: Electron shell that loads the web app in a hardened window
 - `packages/shared`: shared event/types contracts
 - Docker Compose for local Postgres + Redis dependencies
 - Git metadata stamping in builds and runtime
@@ -44,6 +45,7 @@ The Admin Board includes workspace governance and security controls (for example
 - Admin board for:
   - onboarding/invite users
   - role management (`admin`, `manager`, `member`, `guest`)
+  - bot provisioning and API token issuance
   - channel lifecycle management (create/archive)
   - workspace security/governance settings
   - message moderation and audit log
@@ -71,10 +73,29 @@ The Admin Board includes workspace governance and security controls (for example
    ```bash
    npm run dev
    ```
+6. Optional desktop shell:
+   ```bash
+   npm run dev:desktop
+   ```
 
 - Web: http://localhost:5173
 - API: http://localhost:4000
 - Web now uses session login (`/auth/login`) before entering the workspace
+- Desktop shell loads `BRIDGE_DESKTOP_URL` or defaults to `http://localhost:5173`
+
+## Desktop Shell
+
+Bridge includes a minimal Electron shell in `apps/desktop`.
+
+- It uses a secure `BrowserWindow` configuration.
+- It loads the same Bridge web app/backend as the browser client.
+- Set `BRIDGE_DESKTOP_URL` to point it at a different web deployment if needed.
+
+Run it with:
+
+```bash
+npm run dev:desktop
+```
 
 ### Server environment
 
@@ -114,6 +135,7 @@ Admin endpoints are protected by role and require a valid session cookie.
 - `POST /admin/channels/:channelId/members`
 - `DELETE /admin/channels/:channelId/members/:userId`
 - `POST /admin/users`
+- `POST /admin/bots` creates an API-capable bot user and returns a one-time bearer token
 - `PATCH /admin/users/:userId/role`
 - `PATCH /admin/users/:userId/status`
 - `PATCH /admin/settings`
@@ -128,6 +150,7 @@ Admin endpoints are protected by role and require a valid session cookie.
 - `GET /auth/me`
 - `GET /auth/mode`
 - `POST /auth/logout`
+- `POST /bots/messages` posts as a bot using `Authorization: Bearer <token>`
 
 ## Readiness API
 
@@ -180,10 +203,11 @@ Implemented:
 - Threads/replies with `threadRootMessageId` metadata
 - Mentions metadata extraction on message send (`mentionUserIds`)
 - Attachment uploads with pending queue, message binding, ACL-protected download, and retention/moderation cleanup
+- Bot users with one-time API tokens and bearer-authenticated bot message posting
 - Unread counters endpoint and server-side read-state tracking (`GET /me/unread`)
 - Auth/API boundary rate limiting and brute-force protections (`429` + `retry-after`)
 - Optional Postgres-backed persistence (`STORE_DRIVER=postgres`)
-- Database migrations (`001_init.sql`, `002_auth.sql`, `003_channel_acl.sql`, `004_direct_messages.sql`, `005_threads_mentions.sql`)
+- Database migrations (`001_init.sql`, `002_auth.sql`, `003_channel_acl.sql`, `004_direct_messages.sql`, `005_threads_mentions.sql`, `006_attachments.sql`, `007_bot_users.sql`)
 - Realtime WebSocket sync with authenticated user binding
 - Basic server-side message search endpoint
 - Readiness endpoint with store/Redis dependency checks (`GET /ready`)
@@ -206,6 +230,10 @@ Implemented:
   - attachment download endpoint with channel ACL checks
   - pending upload removal endpoint
   - attachment cleanup on moderation deletes and retention sweeps
+- Bot API shipped:
+  - `POST /admin/bots` provisions a bot user and returns a one-time bearer token
+  - `POST /bots/messages` lets bots post into channels with normal ACL checks
+  - bot access tokens are stored hashed in the database
 
 ## Open Work
 
