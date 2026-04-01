@@ -9,9 +9,10 @@
   "scripts": {
     "dev": "npm run dev -w @bridge/server & npm run dev -w @bridge/web",
     "dev:desktop": "npm run dev -w @bridge/desktop",
+    "dev:mobile": "npm run dev -w @bridge/mobile",
     "build": "npm run build -w @bridge/shared && npm run build -w @bridge/server && npm run build -w @bridge/web && npm run build -w @bridge/desktop",
-    "test": "npm run test -w @bridge/shared && npm run test -w @bridge/server && npm run test -w @bridge/web && npm run test -w @bridge/desktop",
-    "lint": "npm run lint -w @bridge/shared && npm run lint -w @bridge/server && npm run lint -w @bridge/web && npm run lint -w @bridge/desktop",
+    "test": "npm run test -w @bridge/shared && npm run test -w @bridge/server && npm run test -w @bridge/web && npm run test -w @bridge/desktop && npm run test -w @bridge/mobile",
+    "lint": "npm run lint -w @bridge/shared && npm run lint -w @bridge/server && npm run lint -w @bridge/web && npm run lint -w @bridge/desktop && npm run lint -w @bridge/mobile",
     "smoke": "./scripts/smoke.sh"
   },
   "devDependencies": {
