@@ -100,7 +100,7 @@ npm run dev:desktop
 ### Server environment
 
 - `DATABASE_URL` points to Postgres (for migrations and upcoming persistent storage)
-- `REDIS_URL` configures Redis reachability checks and upcoming realtime coordination features
+- `REDIS_URL` configures Redis-backed websocket pub/sub, presence fanout, and reachability checks
 - `STORE_DRIVER=postgres` enables persistent storage; use `memory` for local test-only mode
 - `RUN_MIGRATIONS_ON_BOOT=true` applies migrations on server startup in Postgres mode
 - `AUTH_LOGIN_RATE_LIMIT_MAX` and `AUTH_LOGIN_RATE_LIMIT_WINDOW_MS` tune login burst throttling
@@ -221,6 +221,7 @@ Implemented:
 
 - OIDC mode wiring (`/auth/mode`, `/auth/oidc/login`) plus security/session hardening updates
 - `/ready` now reports real store + Redis health instead of Redis placeholder status
+- Redis-backed realtime coordination for websocket message broadcast, typing, and presence when `REDIS_URL` is set
 - Audit export now supports JSON/CSV plus filters (`action`, `actorId`, `since`, `until`) and pagination (`offset`, `limit`)
 - `/metrics` added with in-process HTTP/auth/rate-limit counters
 - Retention sweep operation added for admin maintenance
@@ -248,7 +249,6 @@ Implemented:
 Still required for production replacement:
 
 - Better search (indexing quality, ranking, pagination, retention awareness)
-- Redis-backed presence/pub-sub for reliable multi-instance scaling
 - Observability expansion beyond counters (`/metrics` exists): tracing, log correlation, dashboards, alert routing
 - Backup/restore automation with restore verification in CI/staging
 - Mattermost migration tooling (users/channels and optional history)
