@@ -23,6 +23,33 @@ async function loginAs(app: Awaited<ReturnType<typeof makeApp>>, email: string, 
   return cookie.value;
 }
 
+async function createBot(
+  app: Awaited<ReturnType<typeof makeApp>>,
+  sessionId: string,
+  displayName = "Build Helper"
+) {
+  const response = await app.inject({
+    method: "POST",
+    url: "/admin/bots",
+    cookies: { bridge_session: sessionId },
+    payload: { displayName }
+  });
+
+  assert.equal(response.statusCode, 201);
+  return response.json() as {
+    bot: {
+      id: string;
+      displayName: string;
+      email: string;
+      role: string;
+      isBot?: boolean;
+      activeTokenCount: number;
+      lastTokenCreatedAt: string | null;
+    };
+    token: string;
+  };
+}
+
 test("admins can create bots and receive a one-time token", async (t) => {
   const app = await makeApp();
   t.after(async () => {
@@ -30,66 +57,146 @@ test("admins can create bots and receive a one-time token", async (t) => {
   });
 
   const sessionId = await loginAs(app, "alex@bridge.local", "bridge123!");
-  const response = await app.inject({
-    method: "POST",
-    url: "/admin/bots",
-    cookies: { bridge_session: sessionId },
-    payload: {
-      displayName: "Build Helper"
-    }
-  });
+  const body = await createBot(app, sessionId);
 
-  assert.equal(response.statusCode, 201);
-  const body = response.json() as {
-    bot: { id: string; displayName: string; email: string; role: string; isBot?: boolean };
-    token: string;
-  };
   assert.equal(body.bot.displayName, "Build Helper");
   assert.equal(body.bot.role, "member");
   assert.equal(body.bot.isBot, true);
+  assert.equal(body.bot.activeTokenCount, 1);
+  assert.ok(body.bot.lastTokenCreatedAt);
   assert.match(body.bot.email, /@/);
   assert.ok(body.token.length > 20);
 });
 
-test("bot tokens can post messages", async (t) => {
+test("admins can list bots without exposing token material", async (t) => {
   const app = await makeApp();
   t.after(async () => {
     await app.close();
   });
 
   const sessionId = await loginAs(app, "alex@bridge.local", "bridge123!");
-  const createBot = await app.inject({
-    method: "POST",
+  const created = await createBot(app, sessionId, "Release Bot");
+  const listed = await app.inject({
+    method: "GET",
     url: "/admin/bots",
-    cookies: { bridge_session: sessionId },
-    payload: {
-      displayName: "Release Bot",
-      role: "member"
-    }
+    cookies: { bridge_session: sessionId }
   });
-  assert.equal(createBot.statusCode, 201);
-  const botBody = createBot.json() as {
-    bot: { id: string; displayName: string };
+
+  assert.equal(listed.statusCode, 200);
+  const body = listed.json() as {
+    bots: Array<{
+      id: string;
+      displayName: string;
+      activeTokenCount: number;
+      lastTokenCreatedAt: string | null;
+      token?: string;
+    }>;
+  };
+  const bot = body.bots.find((entry) => entry.id === created.bot.id);
+  assert.ok(bot);
+  assert.equal(bot?.displayName, "Release Bot");
+  assert.equal(bot?.activeTokenCount, 1);
+  assert.ok(bot?.lastTokenCreatedAt);
+  assert.equal(bot && "token" in bot ? bot.token : undefined, undefined);
+});
+
+test("bot tokens can be rotated and old tokens stop working", async (t) => {
+  const app = await makeApp();
+  t.after(async () => {
+    await app.close();
+  });
+
+  const sessionId = await loginAs(app, "alex@bridge.local", "bridge123!");
+  const created = await createBot(app, sessionId, "Delivery Bot");
+  const rotated = await app.inject({
+    method: "POST",
+    url: `/admin/bots/${created.bot.id}/token`,
+    cookies: { bridge_session: sessionId }
+  });
+
+  assert.equal(rotated.statusCode, 200);
+  const rotatedBody = rotated.json() as {
+    bot: { id: string; activeTokenCount: number; lastTokenCreatedAt: string | null };
     token: string;
   };
+  assert.equal(rotatedBody.bot.id, created.bot.id);
+  assert.equal(rotatedBody.bot.activeTokenCount, 1);
+  assert.ok(rotatedBody.bot.lastTokenCreatedAt);
+  assert.notEqual(rotatedBody.token, created.token);
 
-  const posted = await app.inject({
+  const oldTokenPost = await app.inject({
     method: "POST",
     url: "/bots/messages",
-    headers: { authorization: `Bearer ${botBody.token}` },
+    headers: { authorization: `Bearer ${created.token}` },
     payload: {
       channelId: "c-general",
-      content: "Automated release note: the build is green."
+      content: "The old token should no longer work."
     }
   });
+  assert.equal(oldTokenPost.statusCode, 401);
+  assert.match(oldTokenPost.body, /invalid bot token/i);
 
-  assert.equal(posted.statusCode, 201);
-  const postedBody = posted.json() as {
-    message: { senderId: string; channelId: string; content: string };
+  const newTokenPost = await app.inject({
+    method: "POST",
+    url: "/bots/messages",
+    headers: { authorization: `Bearer ${rotatedBody.token}` },
+    payload: {
+      channelId: "c-general",
+      content: "The rotated token is active."
+    }
+  });
+  assert.equal(newTokenPost.statusCode, 201);
+});
+
+test("bot token revocation invalidates active tokens and clears summary counts", async (t) => {
+  const app = await makeApp();
+  t.after(async () => {
+    await app.close();
+  });
+
+  const sessionId = await loginAs(app, "alex@bridge.local", "bridge123!");
+  const created = await createBot(app, sessionId, "Ops Bot");
+  const revoked = await app.inject({
+    method: "DELETE",
+    url: `/admin/bots/${created.bot.id}/token`,
+    cookies: { bridge_session: sessionId }
+  });
+
+  assert.equal(revoked.statusCode, 200);
+  const revokedBody = revoked.json() as {
+    bot: { id: string; activeTokenCount: number; lastTokenCreatedAt: string | null };
+    revokedTokenCount: number;
   };
-  assert.equal(postedBody.message.senderId, botBody.bot.id);
-  assert.equal(postedBody.message.channelId, "c-general");
-  assert.equal(postedBody.message.content, "Automated release note: the build is green.");
+  assert.equal(revokedBody.bot.id, created.bot.id);
+  assert.equal(revokedBody.revokedTokenCount, 1);
+  assert.equal(revokedBody.bot.activeTokenCount, 0);
+  assert.equal(revokedBody.bot.lastTokenCreatedAt, null);
+
+  const listed = await app.inject({
+    method: "GET",
+    url: "/admin/bots",
+    cookies: { bridge_session: sessionId }
+  });
+  assert.equal(listed.statusCode, 200);
+  const listBody = listed.json() as {
+    bots: Array<{ id: string; activeTokenCount: number; lastTokenCreatedAt: string | null }>;
+  };
+  const bot = listBody.bots.find((entry) => entry.id === created.bot.id);
+  assert.ok(bot);
+  assert.equal(bot?.activeTokenCount, 0);
+  assert.equal(bot?.lastTokenCreatedAt, null);
+
+  const postAfterRevoke = await app.inject({
+    method: "POST",
+    url: "/bots/messages",
+    headers: { authorization: `Bearer ${created.token}` },
+    payload: {
+      channelId: "c-general",
+      content: "This should be rejected after revocation."
+    }
+  });
+  assert.equal(postAfterRevoke.statusCode, 401);
+  assert.match(postAfterRevoke.body, /invalid bot token/i);
 });
 
 test("invalid bot tokens are rejected", async (t) => {

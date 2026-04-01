@@ -9,6 +9,13 @@ const sessionTtlMs = 1000 * 60 * 60 * 24 * 7;
 const passwordByUserId = new Map<string, string>();
 const sessionById = new Map<string, { userId: string; expiresAt: string }>();
 const botTokenByHash = new Map<string, string>();
+const botTokenHashesByUserId = new Map<string, Set<string>>();
+const botTokenCreatedAtByHash = new Map<string, string>();
+
+export type BotTokenSummary = {
+  activeTokenCount: number;
+  lastTokenCreatedAt: string | null;
+};
 
 const devDefaultPasswords: Record<string, string> = {
   "u-1": "bridge123!",
@@ -78,14 +85,21 @@ export async function initAuth(users: User[]): Promise<void> {
     const botTokens = await db.query<{
       bot_user_id: string;
       token_hash: string;
+      created_at: Date | string;
       revoked_at: Date | string | null;
-    }>("SELECT bot_user_id, token_hash, revoked_at FROM bot_api_tokens");
+    }>("SELECT bot_user_id, token_hash, created_at, revoked_at FROM bot_api_tokens");
     botTokenByHash.clear();
+    botTokenHashesByUserId.clear();
+    botTokenCreatedAtByHash.clear();
     for (const row of botTokens.rows) {
       if (row.revoked_at) {
         continue;
       }
       botTokenByHash.set(row.token_hash, row.bot_user_id);
+      botTokenCreatedAtByHash.set(row.token_hash, new Date(row.created_at).toISOString());
+      const tokenHashes = botTokenHashesByUserId.get(row.bot_user_id) ?? new Set<string>();
+      tokenHashes.add(row.token_hash);
+      botTokenHashesByUserId.set(row.bot_user_id, tokenHashes);
     }
     return;
   }
@@ -93,6 +107,8 @@ export async function initAuth(users: User[]): Promise<void> {
   passwordByUserId.clear();
   sessionById.clear();
   botTokenByHash.clear();
+  botTokenHashesByUserId.clear();
+  botTokenCreatedAtByHash.clear();
   for (const user of users) {
     if (user.isBot) {
       continue;
@@ -129,22 +145,113 @@ function hashBotToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
-export async function createBotToken(botUserId: string): Promise<string> {
+function forgetBotTokenHash(tokenHash: string): void {
+  const botUserId = botTokenByHash.get(tokenHash);
+  if (!botUserId) {
+    return;
+  }
+  botTokenByHash.delete(tokenHash);
+  botTokenCreatedAtByHash.delete(tokenHash);
+  const tokenHashes = botTokenHashesByUserId.get(botUserId);
+  if (!tokenHashes) {
+    return;
+  }
+  tokenHashes.delete(tokenHash);
+  if (tokenHashes.size === 0) {
+    botTokenHashesByUserId.delete(botUserId);
+  }
+}
+
+export async function revokeBotTokens(botUserId: string): Promise<number> {
+  const activeHashes = [...(botTokenHashesByUserId.get(botUserId) ?? new Set<string>())];
+  if (activeHashes.length === 0) {
+    return 0;
+  }
+
+  if (!persistenceEnabled) {
+    for (const tokenHash of activeHashes) {
+      forgetBotTokenHash(tokenHash);
+    }
+    return activeHashes.length;
+  }
+
+  const db = getDbPool();
+  const result = await db.query<{ token_hash: string }>(
+    `UPDATE bot_api_tokens
+     SET revoked_at = NOW()
+     WHERE bot_user_id = $1 AND revoked_at IS NULL
+     RETURNING token_hash`,
+    [botUserId]
+  );
+  for (const row of result.rows) {
+    forgetBotTokenHash(row.token_hash);
+  }
+  return result.rowCount ?? result.rows.length;
+}
+
+export async function createBotToken(
+  botUserId: string,
+  options?: { replaceExisting?: boolean }
+): Promise<string> {
+  if (options?.replaceExisting) {
+    await revokeBotTokens(botUserId);
+  }
   const rawToken = randomBytes(32).toString("base64url");
   const tokenHash = hashBotToken(rawToken);
   if (!persistenceEnabled) {
     botTokenByHash.set(tokenHash, botUserId);
+    botTokenHashesByUserId.set(
+      botUserId,
+      new Set([...(botTokenHashesByUserId.get(botUserId) ?? new Set<string>()), tokenHash])
+    );
+    botTokenCreatedAtByHash.set(tokenHash, new Date().toISOString());
     return rawToken;
   }
 
   const db = getDbPool();
-  await db.query(
+  const result = await db.query<{ created_at: Date | string }>(
     `INSERT INTO bot_api_tokens (id, bot_user_id, token_hash, created_at)
-     VALUES ($1, $2, $3, NOW())`,
+     VALUES ($1, $2, $3, NOW())
+     RETURNING created_at`,
     [randomUUID(), botUserId, tokenHash]
   );
   botTokenByHash.set(tokenHash, botUserId);
+  botTokenCreatedAtByHash.set(tokenHash, new Date(result.rows[0].created_at).toISOString());
+  const tokenHashes = botTokenHashesByUserId.get(botUserId) ?? new Set<string>();
+  tokenHashes.add(tokenHash);
+  botTokenHashesByUserId.set(botUserId, tokenHashes);
   return rawToken;
+}
+
+export async function getBotTokenSummary(botUserId: string): Promise<BotTokenSummary> {
+  if (!persistenceEnabled) {
+    const tokenHashes = botTokenHashesByUserId.get(botUserId);
+    if (!tokenHashes || tokenHashes.size === 0) {
+      return { activeTokenCount: 0, lastTokenCreatedAt: null };
+    }
+    const createdAt = [...tokenHashes]
+      .map((tokenHash) => botTokenCreatedAtByHash.get(tokenHash) ?? null)
+      .filter((value): value is string => Boolean(value))
+      .sort();
+    const lastTokenCreatedAt = createdAt.length > 0 ? createdAt[createdAt.length - 1] : null;
+    return { activeTokenCount: tokenHashes.size, lastTokenCreatedAt };
+  }
+
+  const db = getDbPool();
+  const result = await db.query<{
+    active_token_count: string | number;
+    last_token_created_at: Date | string | null;
+  }>(
+    `SELECT COUNT(*)::int AS active_token_count, MAX(created_at) AS last_token_created_at
+     FROM bot_api_tokens
+     WHERE bot_user_id = $1 AND revoked_at IS NULL`,
+    [botUserId]
+  );
+  const row = result.rows[0];
+  return {
+    activeTokenCount: Number(row.active_token_count ?? 0),
+    lastTokenCreatedAt: row.last_token_created_at ? new Date(row.last_token_created_at).toISOString() : null
+  };
 }
 
 export async function getUserIdFromBotToken(token: string | undefined): Promise<string | null> {
