@@ -90,7 +90,7 @@ The Admin Board includes workspace governance and security controls (for example
 - `SESSION_COOKIE_SAMESITE` supports `lax` (default), `strict`, or `none`
 - `SESSION_COOKIE_DOMAIN` can scope cookies to your production domain
 - `TRUST_PROXY_HEADERS=true` enables `x-forwarded-for` client IP extraction behind trusted proxies
-- `ATTACHMENT_STORAGE_DRIVER` supports `local` (default) or `s3`
+- `ATTACHMENT_STORAGE_DRIVER` supports `local` (default), `s3`, or `webdav`
 - `ATTACHMENT_LOCAL_DIR` sets local upload directory for `local` driver
 - `ATTACHMENT_MAX_SIZE_BYTES` sets max upload size in bytes
 - `ATTACHMENT_SCAN_MODE` supports `none` (default) or `command`
@@ -98,6 +98,8 @@ The Admin Board includes workspace governance and security controls (for example
 - `ATTACHMENT_SCAN_TIMEOUT_MS` controls scanner command timeout
 - `ATTACHMENT_BLOCKED_EXTENSIONS` overrides blocked executable/script extensions
 - For `ATTACHMENT_STORAGE_DRIVER=s3`, configure `ATTACHMENT_S3_BUCKET`, `ATTACHMENT_S3_REGION`, optional `ATTACHMENT_S3_ENDPOINT`, `ATTACHMENT_S3_KEY_PREFIX`, `ATTACHMENT_S3_FORCE_PATH_STYLE`, `ATTACHMENT_S3_ACCESS_KEY_ID`, and `ATTACHMENT_S3_SECRET_ACCESS_KEY`
+- For `ATTACHMENT_STORAGE_DRIVER=webdav`, configure `ATTACHMENT_WEBDAV_BASE_URL`, `ATTACHMENT_WEBDAV_USERNAME`, `ATTACHMENT_WEBDAV_APP_PASSWORD`, and optional `ATTACHMENT_WEBDAV_PATH_PREFIX`
+- Use a Nextcloud app password for `ATTACHMENT_WEBDAV_APP_PASSWORD`, not the primary account password
 - In `AUTH_MODE=oidc`, configure identity headers with `OIDC_EMAIL_HEADER`, `OIDC_DISPLAY_NAME_HEADER`, and `OIDC_GROUPS_HEADER`
 - Optional OIDC group-to-role mapping via `OIDC_ROLE_GROUP_ADMIN`, `OIDC_ROLE_GROUP_MANAGER`, `OIDC_ROLE_GROUP_MEMBER`, `OIDC_ROLE_GROUP_GUEST`
 
@@ -144,6 +146,7 @@ Admin endpoints are protected by role and require a valid session cookie.
 - `POST /attachments` multipart upload (`file`, `channelId`, optional `threadRootMessageId`)
 - `DELETE /attachments/:attachmentId` removes pending upload (owner-only)
 - `GET /attachments/:attachmentId/download` downloads a linked attachment with ACL checks
+- `ATTACHMENT_STORAGE_DRIVER=webdav` is Nextcloud-compatible through WebDAV `PUT`/`GET`/`DELETE`
 
 ## Unread API
 
@@ -199,6 +202,7 @@ Implemented:
   - upload endpoint with size and extension policy enforcement
   - optional scanner hook (`ATTACHMENT_SCAN_MODE=command`) for AV command integration
   - local and S3-compatible storage drivers
+  - Nextcloud-compatible WebDAV storage driver
   - attachment download endpoint with channel ACL checks
   - pending upload removal endpoint
   - attachment cleanup on moderation deletes and retention sweeps
@@ -214,6 +218,7 @@ Still required for production replacement:
 - Mattermost migration tooling (users/channels and optional history)
 - Desktop/mobile clients (Phase 2) and notification strategy
 - Scanner hardening for attachments (production ClamAV deployment pattern, health checks, and signature update runbook)
+- Nextcloud/WebDAV production hardening notes and credentials rotation guidance for attachment storage
 
 ## Validation Pipeline
 
