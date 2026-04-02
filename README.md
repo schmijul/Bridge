@@ -92,11 +92,13 @@ The Admin Board includes workspace governance, security controls, and bot lifecy
 
 ## Desktop Shell
 
-Bridge includes a minimal Electron shell in `apps/desktop`.
+Bridge includes a native Electron shell in `apps/desktop`.
 
 - It uses a secure `BrowserWindow` configuration.
 - It loads the same Bridge web app/backend as the browser client.
+- It provides a tray icon with show/hide, close-to-tray, and explicit quit actions.
 - Set `BRIDGE_DESKTOP_URL` to point it at a different web deployment if needed.
+- Optional desktop behavior flags: `BRIDGE_DESKTOP_CLOSE_TO_TRAY` and `BRIDGE_DESKTOP_START_HIDDEN`.
 
 Run it with:
 
@@ -246,8 +248,8 @@ Implemented:
 - Optional AES-256-GCM at-rest encryption for attachment payloads via primary/fallback rotation keys
 - Bot users with one-time API tokens, bearer-authenticated bot message posting, and admin token rotation/revocation
 - Notification foundation for mention and direct-message activity, with read/unread tracking and user preferences
-- Minimal Electron desktop shell for the existing web app
-- Minimal Expo mobile shell for auth/bootstrap/channel browsing
+- Native Electron desktop shell with tray, close-to-tray, and explicit quit actions
+- Minimal Expo mobile shell for auth/bootstrap plus notification inbox and unread badges
 - Unread counters endpoint and server-side read-state tracking (`GET /me/unread`)
 - Auth/API boundary rate limiting and brute-force protections (`429` + `retry-after`)
 - Optional Postgres-backed persistence (`STORE_DRIVER=postgres`)
@@ -271,6 +273,10 @@ Implemented:
   - mention and direct-message notification records
   - authenticated list/read APIs for notifications
   - notification preference storage and update API
+- Desktop native shell shipped:
+  - tray icon with restore/hide and explicit quit actions
+  - close-to-tray behavior
+  - secure `BrowserWindow` defaults with hardened navigation handling
 - Attachment v1 shipped:
   - message attachments in shared contracts/bootstrap payloads
   - upload endpoint with size and extension policy enforcement
@@ -292,6 +298,7 @@ Implemented:
   - Electron host app in `apps/desktop`
   - secure `BrowserWindow` defaults
   - configurable target URL via `BRIDGE_DESKTOP_URL`
+  - tray integration with close-to-tray and explicit quit actions
 - Mobile shell shipped:
   - Expo host app in `apps/mobile`
   - session login, bootstrap loading, channel list, and message list shell
@@ -305,7 +312,7 @@ Still required for production replacement:
 - Observability expansion beyond counters (`/metrics` exists): tracing, log correlation, dashboards, alert routing
 - Backup/restore automation with restore verification in CI/staging
 - Mattermost migration tooling (users/channels and optional history)
-- Mobile native features, desktop native features, and push notification delivery strategy
+- Mobile native features and push notification delivery strategy
 - Scanner hardening for attachments (production ClamAV deployment pattern, health checks, and signature update runbook)
 - Nextcloud/WebDAV production hardening notes and credentials rotation guidance for attachment storage
 - Secret-manager-backed key source and automated re-encryption tooling for attachment encryption
