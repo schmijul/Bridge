@@ -14,18 +14,40 @@ import {
   View
 } from "react-native";
 
-import { fetchBootstrap, login, MobileApiError } from "./src/api";
-import { getMobileConfig } from "./src/config";
 import type { Channel, Message, User } from "@bridge/shared";
-import type { MobileBootstrapPayload } from "./src/api";
+import {
+  fetchBootstrap,
+  fetchNotifications,
+  fetchUnreadSummary,
+  login,
+  markNotificationsRead,
+  MobileApiError,
+  type MobileBootstrapPayload,
+  type MobileNotification,
+  type MobileUnreadSummary
+} from "./src/api";
+import { getMobileConfig } from "./src/config";
 
 const config = getMobileConfig();
+const NOTIFICATION_PAGE_SIZE = 12;
+
+type MobileSection = "chat" | "notifications";
+
+type MobileNotificationFeed = {
+  items: MobileNotification[];
+  totalCount: number;
+  unreadCount: number;
+};
 
 function channelLabel(channel: Channel): string {
   if (channel.kind === "channel") {
     return `#${channel.name}`;
   }
   return channel.name;
+}
+
+function channelUnreadMap(summary: MobileUnreadSummary | null): Map<string, number> {
+  return new Map((summary?.channels ?? []).map((entry) => [entry.channelId, entry.unreadCount]));
 }
 
 function formatRelativeTime(value: string): string {
@@ -45,6 +67,17 @@ function senderLabel(message: Message, usersById: Map<string, User>): string {
     return message.senderId;
   }
   return user.isBot ? `${user.displayName} (bot)` : user.displayName;
+}
+
+function notificationTypeLabel(type: MobileNotification["type"]): string {
+  return type === "mention" ? "Mention" : "Direct message";
+}
+
+function shortSummary(value: string | null): string {
+  if (!value) {
+    return "Activity on a message you follow.";
+  }
+  return value.length > 120 ? `${value.slice(0, 117)}...` : value;
 }
 
 function AttachmentChips({ message }: { message: Message }) {
@@ -81,9 +114,7 @@ function MessageCard({
         <Text style={styles.messageSender}>{senderLabel(message, usersById)}</Text>
         <Text style={styles.messageTime}>{formatRelativeTime(message.createdAt)}</Text>
       </View>
-      {message.threadRootMessageId ? (
-        <Text style={styles.threadTag}>Thread reply</Text>
-      ) : null}
+      {message.threadRootMessageId ? <Text style={styles.threadTag}>Thread reply</Text> : null}
       <Text style={styles.messageBody}>{message.content || "Attachment-only message"}</Text>
       <AttachmentChips message={message} />
     </View>
@@ -93,10 +124,12 @@ function MessageCard({
 function ChannelPill({
   channel,
   active,
+  unreadCount,
   onPress
 }: {
   channel: Channel;
   active: boolean;
+  unreadCount: number;
   onPress: () => void;
 }) {
   return (
@@ -105,9 +138,16 @@ function ChannelPill({
       onPress={onPress}
       style={[styles.channelPill, active ? styles.channelPillActive : null]}
     >
-      <Text style={[styles.channelPillLabel, active ? styles.channelPillLabelActive : null]}>
-        {channelLabel(channel)}
-      </Text>
+      <View style={styles.channelPillTopRow}>
+        <Text style={[styles.channelPillLabel, active ? styles.channelPillLabelActive : null]}>
+          {channelLabel(channel)}
+        </Text>
+        {unreadCount > 0 ? (
+          <View style={[styles.badge, active ? styles.badgeActive : null]}>
+            <Text style={[styles.badgeText, active ? styles.badgeTextActive : null]}>{unreadCount}</Text>
+          </View>
+        ) : null}
+      </View>
       <Text style={[styles.channelPillMeta, active ? styles.channelPillMetaActive : null]}>
         {channel.isPrivate ? "private" : "public"}
       </Text>
@@ -115,11 +155,76 @@ function ChannelPill({
   );
 }
 
+function SectionTab({
+  label,
+  active,
+  badge,
+  onPress
+}: {
+  label: string;
+  active: boolean;
+  badge?: number;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={[styles.sectionTab, active ? styles.sectionTabActive : null]}
+    >
+      <Text style={[styles.sectionTabLabel, active ? styles.sectionTabLabelActive : null]}>{label}</Text>
+      {typeof badge === "number" && badge > 0 ? (
+        <View style={[styles.badge, active ? styles.badgeActive : null]}>
+          <Text style={[styles.badgeText, active ? styles.badgeTextActive : null]}>{badge}</Text>
+        </View>
+      ) : null}
+    </Pressable>
+  );
+}
+
+function NotificationCard({
+  notification,
+  channelName
+}: {
+  notification: MobileNotification;
+  channelName: string;
+}) {
+  return (
+    <View style={[styles.notificationCard, notification.isUnread ? styles.notificationCardUnread : null]}>
+      <View style={styles.notificationHeader}>
+        <View style={styles.notificationHeaderLeft}>
+          <Text style={styles.notificationType}>{notificationTypeLabel(notification.type)}</Text>
+          <Text style={styles.notificationTime}>{formatRelativeTime(notification.createdAt)}</Text>
+        </View>
+        <View style={[styles.badge, notification.isUnread ? styles.badgeUnread : styles.badgeRead]}>
+          <Text style={[styles.badgeText, notification.isUnread ? styles.badgeTextUnread : styles.badgeTextRead]}>
+            {notification.isUnread ? "Unread" : "Read"}
+          </Text>
+        </View>
+      </View>
+      <Text style={styles.notificationTitle}>
+        {notification.actorDisplayName}
+        {notification.actorIsBot ? " (bot)" : ""} in {channelName}
+      </Text>
+      <Text style={styles.notificationBody}>{shortSummary(notification.messageContent)}</Text>
+      <View style={styles.notificationMetaRow}>
+        <Text style={styles.notificationMeta}>{notification.channelKind.replace("_", " ")}</Text>
+      </View>
+    </View>
+  );
+}
+
 export default function App() {
   const [bootstrap, setBootstrap] = useState<MobileBootstrapPayload | null>(null);
+  const [workspaceUnread, setWorkspaceUnread] = useState<MobileUnreadSummary | null>(null);
+  const [notificationFeed, setNotificationFeed] = useState<MobileNotificationFeed | null>(null);
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState<MobileSection>("chat");
   const [checkingSession, setCheckingSession] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [notificationsMutating, setNotificationsMutating] = useState(false);
+  const [notificationError, setNotificationError] = useState<string | null>(null);
   const [signedInName, setSignedInName] = useState<string | null>(null);
   const [statusText, setStatusText] = useState(`Connecting to ${config.apiUrl}...`);
   const [sessionMessage, setSessionMessage] = useState<string | null>(null);
@@ -153,9 +258,54 @@ export default function App() {
       .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
   }, [bootstrap, selectedChannel]);
 
+  const unreadByChannel = useMemo(() => channelUnreadMap(workspaceUnread), [workspaceUnread]);
+  const workspaceUnreadCount = workspaceUnread?.totalUnread ?? 0;
+  const notificationUnreadCount = notificationFeed?.unreadCount ?? 0;
+  const notificationItems = notificationFeed?.items ?? [];
+  function handleSessionExpired(message: string): void {
+    setBootstrap(null);
+    setWorkspaceUnread(null);
+    setNotificationFeed(null);
+    setSelectedChannelId(null);
+    setActiveSection("chat");
+    setStatusText("Sign in to load your workspace.");
+    setSessionMessage(message);
+    setNotificationError(null);
+  }
+
+  async function loadNotificationInbox(): Promise<void> {
+    setNotificationsLoading(true);
+    setNotificationError(null);
+
+    try {
+      const [unreadResult, notificationsResult] = await Promise.all([
+        fetchUnreadSummary(config),
+        fetchNotifications(config, {
+          limit: NOTIFICATION_PAGE_SIZE,
+          offset: 0
+        })
+      ]);
+      setWorkspaceUnread(unreadResult);
+      setNotificationFeed({
+        items: notificationsResult.notifications,
+        totalCount: notificationsResult.totalCount,
+        unreadCount: notificationsResult.unreadCount
+      });
+    } catch (error) {
+      if (error instanceof MobileApiError && error.status === 401) {
+        handleSessionExpired("Your session expired. Please sign in again.");
+        return;
+      }
+      setNotificationError(error instanceof Error ? error.message : "Failed to load notifications.");
+    } finally {
+      setNotificationsLoading(false);
+    }
+  }
+
   async function loadWorkspace(options?: { keepSelection?: boolean }): Promise<void> {
     setRefreshing(true);
     setSessionMessage(`Loading workspace from ${config.apiUrl}...`);
+    setNotificationError(null);
     try {
       const nextBootstrap = await fetchBootstrap(config);
       setBootstrap(nextBootstrap);
@@ -169,12 +319,10 @@ export default function App() {
       });
       setStatusText(`Workspace ready: ${nextBootstrap.workspace.settings.workspaceName}`);
       setSessionMessage(signedInName ? `Signed in as ${signedInName}.` : "Session restored from stored cookies.");
+      await loadNotificationInbox();
     } catch (error) {
       if (error instanceof MobileApiError && error.status === 401) {
-        setBootstrap(null);
-        setSelectedChannelId(null);
-        setStatusText("Sign in to load your workspace.");
-        setSessionMessage("Waiting for login.");
+        handleSessionExpired("Waiting for login.");
       } else {
         setSessionMessage(error instanceof Error ? error.message : "Failed to load workspace.");
       }
@@ -210,14 +358,146 @@ export default function App() {
     void loadWorkspace({ keepSelection: true });
   }
 
-  const content = bootstrap ? (
+  function handleRefreshInbox(): void {
+    void loadNotificationInbox();
+  }
+
+  async function handleMarkAllNotificationsRead(): Promise<void> {
+    setNotificationsMutating(true);
+    setNotificationError(null);
+    try {
+      await markNotificationsRead(config, { all: true });
+      await loadNotificationInbox();
+    } catch (error) {
+      if (error instanceof MobileApiError && error.status === 401) {
+        handleSessionExpired("Your session expired. Please sign in again.");
+        return;
+      }
+      setNotificationError(error instanceof Error ? error.message : "Failed to clear notification inbox.");
+    } finally {
+      setNotificationsMutating(false);
+    }
+  }
+
+  const chatSection = (
+    <View style={[styles.section, styles.messagesSection]}>
+      <View style={styles.messageSectionHeader}>
+        <Text style={styles.sectionLabel}>Messages</Text>
+        <Text style={styles.channelDescription}>
+          {selectedChannel ? selectedChannel.description || channelLabel(selectedChannel) : "Choose a channel"}
+        </Text>
+      </View>
+
+      <FlatList
+        data={selectedMessages}
+        keyExtractor={(item) => item.id}
+        contentContainerStyle={styles.messageList}
+        renderItem={({ item }) => <MessageCard message={item} usersById={usersById} />}
+        ListEmptyComponent={
+          <View style={styles.emptyMessageState}>
+            <Text style={styles.emptyTitle}>
+              {selectedChannel ? "No messages in this channel yet." : "Select a channel to view messages."}
+            </Text>
+            <Text style={styles.emptyBody}>
+              This shell already loads auth, bootstrap, unread counts, and notification inbox data so the
+              remaining realtime and composer work can land later without changing the navigation structure.
+            </Text>
+          </View>
+        }
+      />
+    </View>
+  );
+
+  const notificationsSection = (
+    <View style={[styles.section, styles.messagesSection]}>
+      <View style={styles.messageSectionHeader}>
+        <Text style={styles.sectionLabel}>Notifications</Text>
+        <Text style={styles.channelDescription}>
+          Session-backed inbox for mentions and direct messages.
+        </Text>
+      </View>
+
+      <View style={styles.notificationSummaryCard}>
+        <View style={styles.statStrip}>
+          <View style={styles.statCard}>
+            <Text style={styles.statValue}>{notificationUnreadCount}</Text>
+            <Text style={styles.statLabel}>Unread notifications</Text>
+          </View>
+          <View style={styles.statCard}>
+            <Text style={styles.statValue}>{workspaceUnreadCount}</Text>
+            <Text style={styles.statLabel}>Workspace unread</Text>
+          </View>
+        </View>
+        <Text style={styles.helperText}>
+          Notifications use the current session-backed APIs. Push delivery is still an operator-side follow-up.
+        </Text>
+        <View style={styles.notificationActionRow}>
+          <Pressable
+            accessibilityRole="button"
+            disabled={notificationsLoading || notificationsMutating}
+            onPress={handleRefreshInbox}
+            style={[styles.secondaryActionButton, notificationsLoading ? styles.secondaryActionButtonDisabled : null]}
+          >
+            <Text style={styles.secondaryActionButtonText}>
+              {notificationsLoading ? "Refreshing..." : "Refresh inbox"}
+            </Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            disabled={notificationsMutating || notificationUnreadCount === 0}
+            onPress={handleMarkAllNotificationsRead}
+            style={[
+              styles.secondaryActionButton,
+              notificationUnreadCount === 0 ? styles.secondaryActionButtonDisabled : null
+            ]}
+          >
+            <Text style={styles.secondaryActionButtonText}>Mark all read</Text>
+          </Pressable>
+        </View>
+      </View>
+
+      {notificationError ? <Text style={styles.errorText}>{notificationError}</Text> : null}
+
+      {notificationsLoading && notificationItems.length === 0 ? (
+        <View style={styles.loadingRow}>
+          <ActivityIndicator color="#8fc9ff" />
+          <Text style={styles.loadingText}>Loading notifications...</Text>
+        </View>
+      ) : null}
+
+      <FlatList
+        data={notificationItems}
+        keyExtractor={(item) => item.id}
+        contentContainerStyle={styles.messageList}
+        renderItem={({ item }) => {
+          const channel = visibleChannels.find((entry) => entry.id === item.channelId);
+          return (
+            <NotificationCard
+              channelName={channel ? channelLabel(channel) : item.channelName}
+              notification={item}
+            />
+          );
+        }}
+        ListEmptyComponent={
+          <View style={styles.emptyMessageState}>
+            <Text style={styles.emptyTitle}>No notifications yet.</Text>
+            <Text style={styles.emptyBody}>
+              When mentions or direct messages arrive, they will show up here with read state and message context.
+            </Text>
+          </View>
+        }
+      />
+    </View>
+  );
+
+  const authenticatedContent = bootstrap ? (
     <View style={styles.shell}>
       <View style={styles.headerCard}>
         <View style={styles.headerRow}>
           <View style={{ flex: 1 }}>
             <Text style={styles.title}>{bootstrap.workspace.settings.workspaceName}</Text>
             <Text style={styles.subtitle}>
-              {signedInName ? `Signed in as ${signedInName}` : "Session connected"} • {config.apiUrl}
+              {signedInName ? `Signed in as ${signedInName}` : "Session connected"} - {config.apiUrl}
             </Text>
           </View>
           <Pressable onPress={handleRefresh} style={styles.refreshButton}>
@@ -225,9 +505,34 @@ export default function App() {
           </Pressable>
         </View>
         <Text style={styles.statusLine}>{statusText}</Text>
+        <View style={styles.statStrip}>
+          <View style={styles.statCard}>
+            <Text style={styles.statValue}>{workspaceUnreadCount}</Text>
+            <Text style={styles.statLabel}>Unread in workspace</Text>
+          </View>
+          <View style={styles.statCard}>
+            <Text style={styles.statValue}>{notificationUnreadCount}</Text>
+            <Text style={styles.statLabel}>Notifications</Text>
+          </View>
+        </View>
         <Text style={styles.realtimeHint}>
           Realtime socket reserved for the next shell iteration: {config.wsUrl}
         </Text>
+      </View>
+
+      <View style={styles.tabRow}>
+        <SectionTab
+          active={activeSection === "chat"}
+          badge={workspaceUnreadCount}
+          label="Chat"
+          onPress={() => setActiveSection("chat")}
+        />
+        <SectionTab
+          active={activeSection === "notifications"}
+          badge={notificationUnreadCount}
+          label="Inbox"
+          onPress={() => setActiveSection("notifications")}
+        />
       </View>
 
       <View style={styles.section}>
@@ -239,9 +544,10 @@ export default function App() {
           contentContainerStyle={styles.channelStrip}
           renderItem={({ item }) => (
             <ChannelPill
-              channel={item}
               active={item.id === selectedChannel?.id}
+              channel={item}
               onPress={() => setSelectedChannelId(item.id)}
+              unreadCount={unreadByChannel.get(item.id) ?? 0}
             />
           )}
           ListEmptyComponent={<Text style={styles.emptyState}>No visible channels yet.</Text>}
@@ -249,32 +555,8 @@ export default function App() {
         />
       </View>
 
-      <View style={[styles.section, styles.messagesSection]}>
-        <View style={styles.messageSectionHeader}>
-          <Text style={styles.sectionLabel}>Messages</Text>
-          <Text style={styles.channelDescription}>
-            {selectedChannel ? selectedChannel.description || channelLabel(selectedChannel) : "Choose a channel"}
-          </Text>
-        </View>
-
-        <FlatList
-          data={selectedMessages}
-          keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.messageList}
-          renderItem={({ item }) => <MessageCard message={item} usersById={usersById} />}
-          ListEmptyComponent={
-            <View style={styles.emptyMessageState}>
-              <Text style={styles.emptyTitle}>
-                {selectedChannel ? "No messages in this channel yet." : "Select a channel to view messages."}
-              </Text>
-              <Text style={styles.emptyBody}>
-                This shell already loads auth and bootstrap data, so realtime and composer work can land later
-                without changing the navigation structure.
-              </Text>
-            </View>
-          }
-        />
-      </View>
+      {activeSection === "chat" ? chatSection : null}
+      {activeSection === "notifications" ? notificationsSection : null}
     </View>
   ) : (
     <KeyboardAvoidingView
@@ -344,7 +626,7 @@ export default function App() {
     <SafeAreaView style={styles.container}>
       <StatusBar style="light" />
       {sessionMessage ? <Text style={styles.sessionBanner}>{sessionMessage}</Text> : null}
-      {content}
+      {authenticatedContent}
     </SafeAreaView>
   );
 }
@@ -379,7 +661,7 @@ const styles = StyleSheet.create({
     borderRadius: 24,
     borderWidth: 1,
     padding: 16,
-    gap: 8
+    gap: 10
   },
   headerRow: {
     flexDirection: "row",
@@ -489,6 +771,66 @@ const styles = StyleSheet.create({
     color: "#8d9bb0",
     fontSize: 13
   },
+  tabRow: {
+    flexDirection: "row",
+    gap: 10
+  },
+  sectionTab: {
+    alignItems: "center",
+    backgroundColor: "#101a2e",
+    borderColor: "#20314b",
+    borderRadius: 16,
+    borderWidth: 1,
+    flex: 1,
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 12
+  },
+  sectionTabActive: {
+    backgroundColor: "#1d6fff",
+    borderColor: "#1d6fff"
+  },
+  sectionTabLabel: {
+    color: "#dfe8f5",
+    fontSize: 13,
+    fontWeight: "700"
+  },
+  sectionTabLabelActive: {
+    color: "#ffffff"
+  },
+  badge: {
+    alignItems: "center",
+    backgroundColor: "#223654",
+    borderRadius: 999,
+    minWidth: 26,
+    paddingHorizontal: 8,
+    paddingVertical: 3
+  },
+  badgeActive: {
+    backgroundColor: "#ffffff"
+  },
+  badgeUnread: {
+    backgroundColor: "#2bd4aa"
+  },
+  badgeRead: {
+    backgroundColor: "#223654"
+  },
+  badgeText: {
+    color: "#f5f7fb",
+    fontSize: 11,
+    fontWeight: "800"
+  },
+  badgeTextActive: {
+    color: "#1d6fff"
+  },
+  badgeTextUnread: {
+    color: "#04211a"
+  },
+  badgeTextRead: {
+    color: "#dfe8f5"
+  },
   channelStrip: {
     gap: 10,
     paddingVertical: 4
@@ -498,17 +840,24 @@ const styles = StyleSheet.create({
     borderColor: "#20314b",
     borderRadius: 18,
     borderWidth: 1,
-    minWidth: 120,
+    minWidth: 132,
     paddingHorizontal: 14,
     paddingVertical: 12,
-    gap: 2
+    gap: 4
   },
   channelPillActive: {
     backgroundColor: "#1d6fff",
     borderColor: "#1d6fff"
   },
+  channelPillTopRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 8
+  },
   channelPillLabel: {
     color: "#f5f7fb",
+    flex: 1,
     fontSize: 15,
     fontWeight: "700"
   },
@@ -613,5 +962,202 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
     textAlign: "center"
+  },
+  notificationSummaryCard: {
+    backgroundColor: "#101a2e",
+    borderColor: "#20314b",
+    borderRadius: 20,
+    borderWidth: 1,
+    gap: 12,
+    padding: 16
+  },
+  statStrip: {
+    flexDirection: "row",
+    gap: 10
+  },
+  statCard: {
+    backgroundColor: "#0c1424",
+    borderColor: "#223654",
+    borderRadius: 16,
+    borderWidth: 1,
+    flex: 1,
+    gap: 2,
+    padding: 12
+  },
+  statValue: {
+    color: "#f5f7fb",
+    fontSize: 20,
+    fontWeight: "800"
+  },
+  statLabel: {
+    color: "#8d9bb0",
+    fontSize: 11,
+    textTransform: "uppercase"
+  },
+  notificationActionRow: {
+    flexDirection: "row",
+    gap: 10
+  },
+  secondaryActionButton: {
+    alignItems: "center",
+    backgroundColor: "#0c1424",
+    borderColor: "#223654",
+    borderRadius: 16,
+    borderWidth: 1,
+    flex: 1,
+    paddingVertical: 12
+  },
+  secondaryActionButtonDisabled: {
+    opacity: 0.6
+  },
+  secondaryActionButtonText: {
+    color: "#dfe8f5",
+    fontSize: 13,
+    fontWeight: "700"
+  },
+  notificationCard: {
+    backgroundColor: "#101a2e",
+    borderColor: "#20314b",
+    borderRadius: 20,
+    borderWidth: 1,
+    gap: 8,
+    padding: 14
+  },
+  notificationCardUnread: {
+    borderColor: "#2bd4aa"
+  },
+  notificationHeader: {
+    alignItems: "flex-start",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 10
+  },
+  notificationHeaderLeft: {
+    flex: 1,
+    gap: 3
+  },
+  notificationType: {
+    color: "#f5f7fb",
+    fontSize: 13,
+    fontWeight: "800"
+  },
+  notificationTitle: {
+    color: "#f5f7fb",
+    fontSize: 15,
+    fontWeight: "700"
+  },
+  notificationTime: {
+    color: "#8d9bb0",
+    fontSize: 12
+  },
+  notificationBody: {
+    color: "#dfe8f5",
+    fontSize: 14,
+    lineHeight: 20
+  },
+  notificationMetaRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 12
+  },
+  notificationMeta: {
+    color: "#8d9bb0",
+    fontSize: 11,
+    textTransform: "uppercase"
+  },
+  inlineActionButton: {
+    backgroundColor: "#1d6fff",
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 8
+  },
+  inlineActionButtonDisabled: {
+    opacity: 0.6
+  },
+  inlineActionButtonText: {
+    color: "#ffffff",
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  loadMoreButton: {
+    alignItems: "center",
+    backgroundColor: "#101a2e",
+    borderColor: "#20314b",
+    borderRadius: 16,
+    borderWidth: 1,
+    marginTop: 4,
+    paddingVertical: 12
+  },
+  loadMoreButtonDisabled: {
+    opacity: 0.6
+  },
+  loadMoreButtonText: {
+    color: "#dfe8f5",
+    fontSize: 13,
+    fontWeight: "700"
+  },
+  preferencesScroll: {
+    paddingBottom: 28,
+    gap: 16
+  },
+  preferenceSummaryTitle: {
+    color: "#f5f7fb",
+    fontSize: 16,
+    fontWeight: "800"
+  },
+  preferenceSummaryGrid: {
+    flexDirection: "row",
+    gap: 10
+  },
+  preferenceStack: {
+    gap: 10
+  },
+  preferenceRow: {
+    alignItems: "center",
+    backgroundColor: "#0c1424",
+    borderColor: "#223654",
+    borderRadius: 16,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 12,
+    justifyContent: "space-between",
+    padding: 12
+  },
+  preferenceCopy: {
+    flex: 1,
+    gap: 3
+  },
+  preferenceTitle: {
+    color: "#f5f7fb",
+    fontSize: 14,
+    fontWeight: "700"
+  },
+  preferenceDescription: {
+    color: "#8d9bb0",
+    fontSize: 12,
+    lineHeight: 17
+  },
+  preferenceToggle: {
+    alignItems: "center",
+    backgroundColor: "#20314b",
+    borderRadius: 999,
+    minWidth: 64,
+    paddingHorizontal: 14,
+    paddingVertical: 10
+  },
+  preferenceToggleOn: {
+    backgroundColor: "#2bd4aa"
+  },
+  preferenceToggleBusy: {
+    opacity: 0.75
+  },
+  preferenceToggleText: {
+    color: "#dfe8f5",
+    fontSize: 12,
+    fontWeight: "800"
+  },
+  preferenceToggleTextOn: {
+    color: "#04211a"
   }
 });
