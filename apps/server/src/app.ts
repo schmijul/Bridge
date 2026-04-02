@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import multipart from "@fastify/multipart";
+import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -295,6 +296,20 @@ function envBoolean(name: string, fallback: boolean): boolean {
     return false;
   }
   return fallback;
+}
+
+function normalizeRequestId(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) {
+    return null;
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim();
+  if (normalized.length === 0 || normalized.length > 128) {
+    return null;
+  }
+  return /^[A-Za-z0-9._:-]+$/.test(normalized) ? normalized : null;
 }
 
 function normalizeSameSite(raw: string | undefined): "lax" | "strict" | "none" {
@@ -648,7 +663,10 @@ export async function createBridgeApp(
           cb(null, corsAllowList.includes(origin));
         };
 
-  const app = Fastify({ logger: { level: "info" } });
+  const app = Fastify({
+    logger: { level: "info" },
+    genReqId: (request) => normalizeRequestId(request.headers["x-request-id"]) ?? randomUUID()
+  });
   await app.register(cors, { origin: corsOriginMatcher, credentials: true });
   await app.register(cookie);
   await app.register(multipart);
@@ -656,6 +674,7 @@ export async function createBridgeApp(
     await realtime.close();
   });
   app.addHook("onSend", async (_request, reply, payload) => {
+    reply.header("x-request-id", reply.request.id);
     reply.header("x-content-type-options", "nosniff");
     reply.header("x-frame-options", "DENY");
     reply.header("referrer-policy", "no-referrer");

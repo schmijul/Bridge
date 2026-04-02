@@ -193,6 +193,7 @@ Admin endpoints are protected by role and require a valid session cookie.
 ## Readiness API
 
 - `GET /ready` returns dependency readiness for store and Redis with `200` when ready and `503` when required dependencies are unhealthy
+- API responses echo `x-request-id` when the header is supplied, which makes request tracing easier across client and server logs
 
 ## Metrics API
 
@@ -255,6 +256,7 @@ Implemented:
 - Realtime WebSocket sync with authenticated user binding
 - Paginated/filterable message search endpoint with ACL-safe filtering
 - Readiness endpoint with store/Redis dependency checks (`GET /ready`)
+- Request correlation IDs echoed back on HTTP responses via `x-request-id`
 - Prometheus-compatible metrics endpoint (`GET /metrics`)
 - Manual retention maintenance endpoint with audit trail (`POST /admin/maintenance/retention-run`)
 
