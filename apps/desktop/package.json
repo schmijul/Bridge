@@ -10,7 +10,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "electron dist/main.js",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -p tsconfig.json --noEmit"
+    "test": "tsx --test src/*.test.ts && tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
