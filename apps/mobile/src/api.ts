@@ -1,4 +1,12 @@
-import type { Attachment, Channel, Message, User, Workspace } from "@bridge/shared";
+import type {
+  Attachment,
+  Channel,
+  Message,
+  User,
+  Workspace,
+  WorkspaceNotification,
+  WorkspaceNotificationPreferences
+} from "@bridge/shared";
 
 import type { MobileConfig } from "./config";
 
@@ -22,6 +30,45 @@ export type MobileMeResponse = {
 };
 
 export type MobileAttachment = Attachment;
+
+export type MobileUnreadSummary = {
+  totalUnread: number;
+  channels: Array<{
+    channelId: string;
+    unreadCount: number;
+  }>;
+};
+
+export type MobileNotification = WorkspaceNotification & {
+  actorDisplayName: string;
+  actorIsBot: boolean;
+  channelName: string;
+  channelKind: Channel["kind"];
+  messageContent: string | null;
+  messageCreatedAt: string | null;
+  isUnread: boolean;
+};
+
+export type MobileNotificationsPayload = {
+  limit: number;
+  offset: number;
+  unreadOnly: boolean;
+  totalCount: number;
+  unreadCount: number;
+  preferences: WorkspaceNotificationPreferences;
+  notifications: MobileNotification[];
+};
+
+export type MobileNotificationReadResponse = {
+  ok: boolean;
+  updatedCount: number;
+  unreadCount: number;
+  notifications: MobileNotification[];
+};
+
+export type MobileNotificationPreferencesResponse = {
+  preferences: WorkspaceNotificationPreferences;
+};
 
 export class MobileApiError extends Error {
   status: number;
@@ -113,5 +160,44 @@ export async function fetchBootstrap(config: Pick<MobileConfig, "apiUrl">): Prom
 export async function fetchCurrentUser(config: Pick<MobileConfig, "apiUrl">): Promise<MobileMeResponse> {
   return requestJson<MobileMeResponse>(config.apiUrl, "/auth/me", {
     method: "GET"
+  });
+}
+
+export async function fetchUnreadSummary(config: Pick<MobileConfig, "apiUrl">): Promise<MobileUnreadSummary> {
+  return requestJson<MobileUnreadSummary>(config.apiUrl, "/me/unread", {
+    method: "GET"
+  });
+}
+
+export async function fetchNotifications(
+  config: Pick<MobileConfig, "apiUrl">,
+  options: { limit?: number; offset?: number; unreadOnly?: boolean } = {}
+): Promise<MobileNotificationsPayload> {
+  const params = new URLSearchParams();
+  params.set("limit", String(options.limit ?? 20));
+  params.set("offset", String(options.offset ?? 0));
+  params.set("unreadOnly", String(options.unreadOnly ?? false));
+  return requestJson<MobileNotificationsPayload>(config.apiUrl, `/notifications?${params.toString()}`, {
+    method: "GET"
+  });
+}
+
+export async function markNotificationsRead(
+  config: Pick<MobileConfig, "apiUrl">,
+  payload: { all?: boolean; notificationIds?: string[] }
+): Promise<MobileNotificationReadResponse> {
+  return requestJson<MobileNotificationReadResponse>(config.apiUrl, "/notifications/read", {
+    method: "POST",
+    body: payload
+  });
+}
+
+export async function updateNotificationPreferences(
+  config: Pick<MobileConfig, "apiUrl">,
+  payload: { mentionEnabled?: boolean; directMessageEnabled?: boolean }
+): Promise<MobileNotificationPreferencesResponse> {
+  return requestJson<MobileNotificationPreferencesResponse>(config.apiUrl, "/notifications/preferences", {
+    method: "PATCH",
+    body: payload
   });
 }
