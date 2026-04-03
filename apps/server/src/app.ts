@@ -55,6 +55,7 @@ import {
   users,
   workspace
 } from "./store.js";
+import { createPushDeliveryRunner, parsePushDeliveryConfig } from "./push-delivery.js";
 import {
   createAttachmentScanner,
   createAttachmentStorage,
@@ -651,6 +652,25 @@ export async function createBridgeApp(
   const attachmentMaxBytes = envNumber("ATTACHMENT_MAX_SIZE_BYTES", 25 * 1024 * 1024);
   const blockedAttachmentExtensions = parseBlockedExtensions(process.env.ATTACHMENT_BLOCKED_EXTENSIONS);
   const realtime = await createRealtimeCoordinator(process.env.REDIS_URL);
+  const pushDelivery = createPushDeliveryRunner(parsePushDeliveryConfig(process.env), {
+    onResult(result) {
+      if (result.claimed > 0) {
+        incrementCounter(counters, "push.claimed", result.claimed);
+      }
+      if (result.delivered > 0) {
+        incrementCounter(counters, "push.delivered", result.delivered);
+      }
+      if (result.retried > 0) {
+        incrementCounter(counters, "push.retried", result.retried);
+      }
+      if (result.failedTerminal > 0) {
+        incrementCounter(counters, "push.failed_terminal", result.failedTerminal);
+      }
+      if (result.errors > 0) {
+        incrementCounter(counters, "push.errors", result.errors);
+      }
+    }
+  });
   const corsAllowList = parseCorsOrigins(corsOrigin);
   const corsOriginMatcher =
     corsAllowList.length <= 1
@@ -671,6 +691,7 @@ export async function createBridgeApp(
   await app.register(cookie);
   await app.register(multipart);
   app.addHook("onClose", async () => {
+    pushDelivery.stop();
     await realtime.close();
   });
   app.addHook("onSend", async (_request, reply, payload) => {
@@ -703,6 +724,7 @@ export async function createBridgeApp(
     options?.rateLimit?.apiWindowMs ?? envNumber("API_RATE_LIMIT_WINDOW_MS", 60 * 1000)
   );
   const counters: CounterMap = new Map<string, number>();
+  pushDelivery.start();
   app.addHook("onResponse", async (_request, reply) => {
     incrementCounter(counters, "http.responses.total");
     incrementCounter(counters, `http.responses.status.${reply.statusCode}`);
@@ -1427,6 +1449,34 @@ export async function createBridgeApp(
     const preferences = updateNotificationPreferences(auth.actorId, parsed.data);
     return {
       preferences
+    };
+  });
+
+  app.get("/admin/notifications/delivery", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+    return pushDelivery.getStatus();
+  });
+
+  app.post("/admin/notifications/delivery/run", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+    const result = await pushDelivery.runOnce();
+    return {
+      result,
+      status: pushDelivery.getStatus()
     };
   });
 

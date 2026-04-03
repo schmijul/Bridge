@@ -150,6 +150,10 @@ npm run dev:mobile
 - For `ATTACHMENT_STORAGE_DRIVER=s3`, configure `ATTACHMENT_S3_BUCKET`, `ATTACHMENT_S3_REGION`, optional `ATTACHMENT_S3_ENDPOINT`, `ATTACHMENT_S3_KEY_PREFIX`, `ATTACHMENT_S3_FORCE_PATH_STYLE`, `ATTACHMENT_S3_ACCESS_KEY_ID`, and `ATTACHMENT_S3_SECRET_ACCESS_KEY`
 - For `ATTACHMENT_STORAGE_DRIVER=webdav`, configure `ATTACHMENT_WEBDAV_BASE_URL`, `ATTACHMENT_WEBDAV_USERNAME`, `ATTACHMENT_WEBDAV_APP_PASSWORD`, and optional `ATTACHMENT_WEBDAV_PATH_PREFIX`
 - Use a Nextcloud app password for `ATTACHMENT_WEBDAV_APP_PASSWORD`, not the primary account password
+- `PUSH_DELIVERY_ENABLED=true` enables async notification push delivery worker
+- `PUSH_DELIVERY_PROVIDER=webhook` sends delivery jobs to `PUSH_DELIVERY_WEBHOOK_URL` via HTTP `POST`
+- `PUSH_DELIVERY_WEBHOOK_AUTH_HEADER` optionally sets the outbound `Authorization` header for the push gateway
+- `PUSH_DELIVERY_POLL_INTERVAL_MS`, `PUSH_DELIVERY_BATCH_SIZE`, `PUSH_DELIVERY_MAX_ATTEMPTS`, `PUSH_DELIVERY_RETRY_BASE_MS`, and `PUSH_DELIVERY_RETRY_MAX_MS` tune worker throughput and retry policy
 - In `AUTH_MODE=oidc`, configure identity headers with `OIDC_EMAIL_HEADER`, `OIDC_DISPLAY_NAME_HEADER`, and `OIDC_GROUPS_HEADER`
 - Optional OIDC group-to-role mapping via `OIDC_ROLE_GROUP_ADMIN`, `OIDC_ROLE_GROUP_MANAGER`, `OIDC_ROLE_GROUP_MEMBER`, `OIDC_ROLE_GROUP_GUEST`
 
@@ -173,6 +177,8 @@ Admin endpoints are protected by role and require a valid session cookie.
 - `PATCH /admin/settings`
 - `PATCH /admin/settings` can update governance/security settings such as `allowGuestAccess` and `enforceMfaForAdmins`
 - `POST /admin/maintenance/retention-run` executes a retention sweep based on `messageRetentionDays`
+- `GET /admin/notifications/delivery` returns push delivery worker status and queue stats
+- `POST /admin/notifications/delivery/run` triggers a one-shot push delivery batch
 - `DELETE /admin/messages/:messageId`
 
 ## Auth API
@@ -249,6 +255,7 @@ Implemented:
 - Optional AES-256-GCM at-rest encryption for attachment payloads via primary/fallback rotation keys
 - Bot users with one-time API tokens, bearer-authenticated bot message posting, and admin token rotation/revocation
 - Notification foundation for mention and direct-message activity, with read/unread tracking and user preferences
+- Optional async push delivery worker for notifications with webhook fanout, queue retries, and admin status/run controls
 - Native Electron desktop shell with tray, close-to-tray, and explicit quit actions
 - Minimal Expo mobile shell for auth/bootstrap plus notification inbox and unread badges
 - Unread counters endpoint and server-side read-state tracking (`GET /me/unread`)

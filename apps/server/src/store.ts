@@ -48,6 +48,21 @@ export type NotificationRecord = WorkspaceNotification;
 
 export type NotificationPreferencesRecord = WorkspaceNotificationPreferences;
 
+export type NotificationDeliveryStatus = "pending" | "processing" | "delivered" | "failed";
+
+export type NotificationDeliveryRecord = {
+  id: string;
+  notificationId: string;
+  userId: string;
+  status: NotificationDeliveryStatus;
+  attemptCount: number;
+  nextAttemptAt: string;
+  lastError?: string;
+  deliveredAt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 const initialWorkspace: Workspace = {
   id: workspaceId,
   settings: {
@@ -320,6 +335,7 @@ export const channels: Channel[] = [];
 export const messages: Message[] = [];
 export const attachments: AttachmentRecord[] = [];
 export const notifications: NotificationRecord[] = [];
+export const notificationDeliveries: NotificationDeliveryRecord[] = [];
 export const auditLog: AuditLogEntry[] = [];
 
 const presence = new Map<string, PresenceState>();
@@ -465,6 +481,186 @@ export function markNotificationsRead(
   };
 }
 
+function findNotificationDeliveryById(deliveryId: string): NotificationDeliveryRecord | undefined {
+  return notificationDeliveries.find((entry) => entry.id === deliveryId);
+}
+
+export function getNotificationDeliveryStats(nowIso = new Date().toISOString()): {
+  pendingCount: number;
+  processingCount: number;
+  deliveredCount: number;
+  failedCount: number;
+  retryDueCount: number;
+  totalCount: number;
+  oldestPendingCreatedAt: string | null;
+} {
+  const nowMs = new Date(nowIso).getTime();
+  let oldestPendingMs = Number.POSITIVE_INFINITY;
+  let pendingCount = 0;
+  let processingCount = 0;
+  let deliveredCount = 0;
+  let failedCount = 0;
+  let retryDueCount = 0;
+
+  for (const delivery of notificationDeliveries) {
+    if (delivery.status === "pending") {
+      pendingCount += 1;
+      const createdMs = new Date(delivery.createdAt).getTime();
+      if (Number.isFinite(createdMs)) {
+        oldestPendingMs = Math.min(oldestPendingMs, createdMs);
+      }
+      const nextAttemptMs = new Date(delivery.nextAttemptAt).getTime();
+      if (Number.isFinite(nextAttemptMs) && nextAttemptMs <= nowMs) {
+        retryDueCount += 1;
+      }
+      continue;
+    }
+    if (delivery.status === "processing") {
+      processingCount += 1;
+      continue;
+    }
+    if (delivery.status === "delivered") {
+      deliveredCount += 1;
+      continue;
+    }
+    failedCount += 1;
+  }
+
+  return {
+    pendingCount,
+    processingCount,
+    deliveredCount,
+    failedCount,
+    retryDueCount,
+    totalCount: notificationDeliveries.length,
+    oldestPendingCreatedAt: Number.isFinite(oldestPendingMs)
+      ? new Date(oldestPendingMs).toISOString()
+      : null
+  };
+}
+
+export function claimNotificationDeliveries(limit = 25, nowIso = new Date().toISOString()): Array<{
+  delivery: NotificationDeliveryRecord;
+  notification: NotificationRecord;
+}> {
+  const nowMs = new Date(nowIso).getTime();
+  const safeLimit = Math.max(1, Math.min(100, limit));
+  const claimed: Array<{ delivery: NotificationDeliveryRecord; notification: NotificationRecord }> = [];
+  const changed: NotificationDeliveryRecord[] = [];
+  const rows = [...notificationDeliveries]
+    .sort((a, b) => {
+      const dueDelta = new Date(a.nextAttemptAt).getTime() - new Date(b.nextAttemptAt).getTime();
+      if (dueDelta !== 0) {
+        return dueDelta;
+      }
+      return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+    });
+
+  for (const delivery of rows) {
+    if (claimed.length >= safeLimit) {
+      break;
+    }
+    if (delivery.status !== "pending") {
+      continue;
+    }
+    const nextAttemptMs = new Date(delivery.nextAttemptAt).getTime();
+    if (!Number.isFinite(nextAttemptMs) || nextAttemptMs > nowMs) {
+      continue;
+    }
+    const notification = notifications.find((entry) => entry.id === delivery.notificationId);
+    if (!notification) {
+      delivery.status = "failed";
+      delivery.lastError = "notification record missing";
+      delivery.updatedAt = nowIso;
+      changed.push(delivery);
+      continue;
+    }
+    delivery.status = "processing";
+    delivery.updatedAt = nowIso;
+    changed.push(delivery);
+    claimed.push({ delivery, notification });
+  }
+
+  if (changed.length > 0) {
+    enqueuePersist(async () => {
+      const db = getDbPool();
+      for (const delivery of changed) {
+        await db.query(
+          `UPDATE notification_deliveries
+           SET status = $2, last_error = $3, updated_at = $4
+           WHERE id = $1`,
+          [delivery.id, delivery.status, delivery.lastError ?? null, delivery.updatedAt]
+        );
+      }
+    });
+  }
+
+  return claimed;
+}
+
+export function markNotificationDeliveryDelivered(deliveryId: string, nowIso = new Date().toISOString()): void {
+  const delivery = findNotificationDeliveryById(deliveryId);
+  if (!delivery) {
+    return;
+  }
+  delivery.status = "delivered";
+  delivery.deliveredAt = nowIso;
+  delivery.lastError = undefined;
+  delivery.updatedAt = nowIso;
+  enqueuePersist(async () => {
+    const db = getDbPool();
+    await db.query(
+      `UPDATE notification_deliveries
+       SET status = 'delivered', delivered_at = $2, last_error = NULL, updated_at = $2
+       WHERE id = $1`,
+      [deliveryId, nowIso]
+    );
+  });
+}
+
+export function markNotificationDeliveryFailed(
+  deliveryId: string,
+  errorMessage: string,
+  options?: { maxAttempts?: number; retryBaseMs?: number; retryMaxMs?: number; nowIso?: string }
+): void {
+  const delivery = findNotificationDeliveryById(deliveryId);
+  if (!delivery) {
+    return;
+  }
+  const nowIso = options?.nowIso ?? new Date().toISOString();
+  const maxAttempts = Math.max(1, Math.min(20, options?.maxAttempts ?? 5));
+  const retryBaseMs = Math.max(250, options?.retryBaseMs ?? 5_000);
+  const retryMaxMs = Math.max(retryBaseMs, options?.retryMaxMs ?? 5 * 60_000);
+  const nextAttemptCount = delivery.attemptCount + 1;
+  const atLimit = nextAttemptCount >= maxAttempts;
+  const backoffMs = Math.min(retryMaxMs, retryBaseMs * 2 ** Math.max(0, nextAttemptCount - 1));
+  delivery.attemptCount = nextAttemptCount;
+  delivery.lastError = errorMessage.slice(0, 400);
+  delivery.updatedAt = nowIso;
+  if (atLimit) {
+    delivery.status = "failed";
+  } else {
+    delivery.status = "pending";
+    delivery.nextAttemptAt = new Date(new Date(nowIso).getTime() + backoffMs).toISOString();
+  }
+  enqueuePersist(async () => {
+    const db = getDbPool();
+    await db.query(
+      `UPDATE notification_deliveries
+       SET status = $2, attempt_count = $3, next_attempt_at = $4, last_error = $5, updated_at = $6
+       WHERE id = $1`,
+      [
+        deliveryId,
+        delivery.status,
+        delivery.attemptCount,
+        delivery.nextAttemptAt,
+        delivery.lastError ?? null,
+        delivery.updatedAt
+      ]
+    );
+  });
+}
+
 function enqueuePersist(task: () => Promise<void>): void {
   if (!persistenceEnabled) {
     return;
@@ -483,6 +679,7 @@ function setInMemoryDefaults(now: string): void {
   messages.splice(0, messages.length, ...makeInitialMessages(now));
   attachments.splice(0, attachments.length);
   notifications.splice(0, notifications.length);
+  notificationDeliveries.splice(0, notificationDeliveries.length);
   auditLog.splice(0, auditLog.length, ...makeInitialAuditLog(now));
   presence.clear();
   presence.set("u-1", "online");
@@ -503,6 +700,7 @@ async function seedDatabaseFromMemory(): Promise<void> {
   try {
   await db.query("DELETE FROM read_state");
   await db.query("DELETE FROM presence_state");
+  await db.query("DELETE FROM notification_deliveries");
   await db.query("DELETE FROM notifications");
   await db.query("DELETE FROM notification_preferences");
   await db.query("DELETE FROM attachments");
@@ -592,6 +790,26 @@ async function seedDatabaseFromMemory(): Promise<void> {
           notification.messageId,
           notification.readAt ?? null,
           notification.createdAt
+        ]
+      );
+    }
+
+    for (const delivery of notificationDeliveries) {
+      await db.query(
+        `INSERT INTO notification_deliveries
+          (id, notification_id, user_id, status, attempt_count, next_attempt_at, last_error, delivered_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          delivery.id,
+          delivery.notificationId,
+          delivery.userId,
+          delivery.status,
+          delivery.attemptCount,
+          delivery.nextAttemptAt,
+          delivery.lastError ?? null,
+          delivery.deliveredAt ?? null,
+          delivery.createdAt,
+          delivery.updatedAt
         ]
       );
     }
@@ -829,6 +1047,35 @@ async function loadStoreFromDatabase(): Promise<boolean> {
     }))
   );
 
+  const notificationDeliveryResult = await db.query<{
+    id: string;
+    notification_id: string;
+    user_id: string;
+    status: NotificationDeliveryStatus;
+    attempt_count: number;
+    next_attempt_at: Date | string;
+    last_error: string | null;
+    delivered_at: Date | string | null;
+    created_at: Date | string;
+    updated_at: Date | string;
+  }>("SELECT * FROM notification_deliveries ORDER BY created_at ASC");
+  notificationDeliveries.splice(
+    0,
+    notificationDeliveries.length,
+    ...notificationDeliveryResult.rows.map((row) => ({
+      id: row.id,
+      notificationId: row.notification_id,
+      userId: row.user_id,
+      status: row.status,
+      attemptCount: row.attempt_count,
+      nextAttemptAt: new Date(row.next_attempt_at).toISOString(),
+      lastError: row.last_error ?? undefined,
+      deliveredAt: row.delivered_at ? new Date(row.delivered_at).toISOString() : undefined,
+      createdAt: new Date(row.created_at).toISOString(),
+      updatedAt: new Date(row.updated_at).toISOString()
+    }))
+  );
+
   const notificationPreferencesResult = await db.query<{
     user_id: string;
     mention_enabled: boolean;
@@ -975,6 +1222,17 @@ function createNotificationRecord(input: {
     createdAt: input.createdAt ?? new Date().toISOString()
   };
   notifications.unshift(record);
+  const delivery: NotificationDeliveryRecord = {
+    id: randomUUID(),
+    notificationId: record.id,
+    userId: record.userId,
+    status: "pending",
+    attemptCount: 0,
+    nextAttemptAt: record.createdAt,
+    createdAt: record.createdAt,
+    updatedAt: record.createdAt
+  };
+  notificationDeliveries.unshift(delivery);
   enqueuePersist(async () => {
     const db = getDbPool();
     await db.query(
@@ -990,6 +1248,12 @@ function createNotificationRecord(input: {
         record.messageId,
         record.createdAt
       ]
+    );
+    await db.query(
+      `INSERT INTO notification_deliveries
+        (id, notification_id, user_id, status, attempt_count, next_attempt_at, last_error, delivered_at, created_at, updated_at)
+       VALUES ($1, $2, $3, 'pending', 0, $4, NULL, NULL, $5, $5)`,
+      [delivery.id, delivery.notificationId, delivery.userId, delivery.nextAttemptAt, delivery.createdAt]
     );
   });
   return record;
@@ -1266,7 +1530,11 @@ function removeNotificationRecordsByMessageId(messageId: string): NotificationRe
   }
   const removedIds = new Set(removed.map((notification) => notification.id));
   const kept = notifications.filter((notification) => !removedIds.has(notification.id));
+  const keptDeliveries = notificationDeliveries.filter(
+    (delivery) => !removedIds.has(delivery.notificationId)
+  );
   notifications.splice(0, notifications.length, ...kept);
+  notificationDeliveries.splice(0, notificationDeliveries.length, ...keptDeliveries);
   return removed;
 }
 
@@ -1870,10 +2138,14 @@ export function runRetentionSweep(nowIso = new Date().toISOString()): {
   const keptNotifications = notifications.filter(
     (notification) => !deletedNotificationIdSet.has(notification.id)
   );
+  const keptNotificationDeliveries = notificationDeliveries.filter(
+    (delivery) => !deletedNotificationIdSet.has(delivery.notificationId)
+  );
 
   messages.splice(0, messages.length, ...keptMessages);
   attachments.splice(0, attachments.length, ...keptAttachments);
   notifications.splice(0, notifications.length, ...keptNotifications);
+  notificationDeliveries.splice(0, notificationDeliveries.length, ...keptNotificationDeliveries);
   for (const [key, state] of readState.entries()) {
     if (deletedIds.has(state.lastMessageId)) {
       readState.delete(key);
