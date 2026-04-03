@@ -112,12 +112,23 @@ export function parseAttachmentStorageConfig(env: NodeJS.ProcessEnv): Attachment
         "ATTACHMENT_STORAGE_DRIVER=webdav requires ATTACHMENT_WEBDAV_BASE_URL, ATTACHMENT_WEBDAV_USERNAME and ATTACHMENT_WEBDAV_APP_PASSWORD"
       );
     }
+    const username = env.ATTACHMENT_WEBDAV_USERNAME.trim();
+    const appPassword = env.ATTACHMENT_WEBDAV_APP_PASSWORD.trim();
+    if (!username || !appPassword) {
+      throw new Error(
+        "ATTACHMENT_STORAGE_DRIVER=webdav requires non-empty ATTACHMENT_WEBDAV_USERNAME and ATTACHMENT_WEBDAV_APP_PASSWORD"
+      );
+    }
+    const allowInsecureWebDav = (env.ATTACHMENT_WEBDAV_ALLOW_INSECURE ?? "false").trim().toLowerCase() === "true";
+    const baseUrl = validateWebDavBaseUrl(env.ATTACHMENT_WEBDAV_BASE_URL, allowInsecureWebDav);
+    const pathPrefix = normalizePathPrefix(env.ATTACHMENT_WEBDAV_PATH_PREFIX ?? "bridge/attachments");
+    validateWebDavPathPrefix(pathPrefix);
     return {
       driver: "webdav",
-      baseUrl: env.ATTACHMENT_WEBDAV_BASE_URL,
-      username: env.ATTACHMENT_WEBDAV_USERNAME,
-      appPassword: env.ATTACHMENT_WEBDAV_APP_PASSWORD,
-      pathPrefix: normalizePathPrefix(env.ATTACHMENT_WEBDAV_PATH_PREFIX ?? "bridge/attachments")
+      baseUrl,
+      username,
+      appPassword,
+      pathPrefix
     };
   }
   return {
@@ -294,6 +305,38 @@ function normalizeBaseUrl(baseUrl: string): URL {
   url.search = "";
   url.hash = "";
   return url;
+}
+
+function validateWebDavBaseUrl(baseUrlRaw: string, allowInsecure: boolean): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrlRaw);
+  } catch {
+    throw new Error("ATTACHMENT_WEBDAV_BASE_URL must be a valid URL");
+  }
+  if (parsed.search || parsed.hash) {
+    throw new Error("ATTACHMENT_WEBDAV_BASE_URL must not include query parameters or fragments");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("ATTACHMENT_WEBDAV_BASE_URL must not include embedded credentials");
+  }
+  const protocol = parsed.protocol.toLowerCase();
+  if (protocol !== "https:") {
+    const isLocalhost = ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname.toLowerCase());
+    if (!allowInsecure || !isLocalhost || protocol !== "http:") {
+      throw new Error(
+        "ATTACHMENT_WEBDAV_BASE_URL must use https (set ATTACHMENT_WEBDAV_ALLOW_INSECURE=true only for local http://localhost testing)"
+      );
+    }
+  }
+  return parsed.toString();
+}
+
+function validateWebDavPathPrefix(pathPrefix: string): void {
+  const segments = splitPathSegments(pathPrefix);
+  if (segments.some((segment) => segment === "." || segment === "..")) {
+    throw new Error("ATTACHMENT_WEBDAV_PATH_PREFIX must not contain '.' or '..' segments");
+  }
 }
 
 function buildWebDavUrl(baseUrl: string, ...segments: string[]): URL {

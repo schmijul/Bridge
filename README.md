@@ -149,7 +149,10 @@ npm run dev:mobile
 - `ATTACHMENT_BLOCKED_EXTENSIONS` overrides blocked executable/script extensions
 - For `ATTACHMENT_STORAGE_DRIVER=s3`, configure `ATTACHMENT_S3_BUCKET`, `ATTACHMENT_S3_REGION`, optional `ATTACHMENT_S3_ENDPOINT`, `ATTACHMENT_S3_KEY_PREFIX`, `ATTACHMENT_S3_FORCE_PATH_STYLE`, `ATTACHMENT_S3_ACCESS_KEY_ID`, and `ATTACHMENT_S3_SECRET_ACCESS_KEY`
 - For `ATTACHMENT_STORAGE_DRIVER=webdav`, configure `ATTACHMENT_WEBDAV_BASE_URL`, `ATTACHMENT_WEBDAV_USERNAME`, `ATTACHMENT_WEBDAV_APP_PASSWORD`, and optional `ATTACHMENT_WEBDAV_PATH_PREFIX`
+- `ATTACHMENT_WEBDAV_BASE_URL` must be `https://...` in production and should not include query strings, fragments, or embedded credentials
+- `ATTACHMENT_WEBDAV_ALLOW_INSECURE=true` is only for local `http://localhost...` testing and should stay `false` in production
 - Use a Nextcloud app password for `ATTACHMENT_WEBDAV_APP_PASSWORD`, not the primary account password
+- Rotate WebDAV app passwords with overlap: update server secret, restart, validate upload/download, then revoke the old app password
 - In `AUTH_MODE=oidc`, configure identity headers with `OIDC_EMAIL_HEADER`, `OIDC_DISPLAY_NAME_HEADER`, and `OIDC_GROUPS_HEADER`
 - Optional OIDC group-to-role mapping via `OIDC_ROLE_GROUP_ADMIN`, `OIDC_ROLE_GROUP_MANAGER`, `OIDC_ROLE_GROUP_MEMBER`, `OIDC_ROLE_GROUP_GUEST`
 
@@ -306,6 +309,14 @@ Implemented:
   - session login, bootstrap loading, channel list, and message list shell
   - configurable backend URLs via `API_URL` and `WS_URL`
 
+### Recently Delivered (2026-04-03)
+
+- WebDAV/Nextcloud attachment storage hardening:
+  - stricter config validation (`https` required by default, no embedded credentials, no query/hash in base URL)
+  - local-only insecure mode gate (`ATTACHMENT_WEBDAV_ALLOW_INSECURE=true` for `http://localhost` testing)
+  - unsafe path prefix segments (`.` / `..`) are rejected
+  - documented app-password rotation guidance for production operation
+
 ## Open Work
 
 Still required for production replacement:
@@ -316,7 +327,6 @@ Still required for production replacement:
 - Mattermost migration tooling (users/channels and optional history)
 - Mobile native features and push notification delivery strategy
 - Scanner hardening for attachments (production ClamAV deployment pattern, health checks, and signature update runbook)
-- Nextcloud/WebDAV production hardening notes and credentials rotation guidance for attachment storage
 - Secret-manager-backed key source and automated re-encryption tooling for attachment encryption
 
 ## Validation Pipeline
