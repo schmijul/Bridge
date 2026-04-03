@@ -399,3 +399,65 @@ test("webdav attachment storage uploads, reads and deletes via WebDAV semantics"
   assert.match(calls[2]!.headers.authorization, /^Basic /);
   assert.equal(calls[2]!.headers["content-type"], "text/plain");
 });
+
+test("webdav config hardening requires https and sane URL shape", () => {
+  assert.throws(
+    () =>
+      parseAttachmentStorageConfig({
+        ATTACHMENT_STORAGE_DRIVER: "webdav",
+        ATTACHMENT_WEBDAV_BASE_URL: "http://cloud.example.com/remote.php/dav/files/bridge/",
+        ATTACHMENT_WEBDAV_USERNAME: "bridge-bot",
+        ATTACHMENT_WEBDAV_APP_PASSWORD: "app-password"
+      }),
+    /must use https/i
+  );
+
+  assert.throws(
+    () =>
+      parseAttachmentStorageConfig({
+        ATTACHMENT_STORAGE_DRIVER: "webdav",
+        ATTACHMENT_WEBDAV_BASE_URL: "https://bridge-bot:secret@cloud.example.com/remote.php/dav/files/bridge/",
+        ATTACHMENT_WEBDAV_USERNAME: "bridge-bot",
+        ATTACHMENT_WEBDAV_APP_PASSWORD: "app-password"
+      }),
+    /must not include embedded credentials/i
+  );
+
+  assert.throws(
+    () =>
+      parseAttachmentStorageConfig({
+        ATTACHMENT_STORAGE_DRIVER: "webdav",
+        ATTACHMENT_WEBDAV_BASE_URL: "https://cloud.example.com/remote.php/dav/files/bridge/?token=abc",
+        ATTACHMENT_WEBDAV_USERNAME: "bridge-bot",
+        ATTACHMENT_WEBDAV_APP_PASSWORD: "app-password"
+      }),
+    /must not include query parameters/i
+  );
+});
+
+test("webdav config allows insecure localhost only when explicitly enabled", () => {
+  const config = parseAttachmentStorageConfig({
+    ATTACHMENT_STORAGE_DRIVER: "webdav",
+    ATTACHMENT_WEBDAV_BASE_URL: "http://localhost:19000/remote.php/dav/files/bridge/",
+    ATTACHMENT_WEBDAV_USERNAME: "bridge-bot",
+    ATTACHMENT_WEBDAV_APP_PASSWORD: "app-password",
+    ATTACHMENT_WEBDAV_ALLOW_INSECURE: "true",
+    ATTACHMENT_WEBDAV_PATH_PREFIX: "Bridge/attachments"
+  });
+  assert.equal(config.driver, "webdav");
+  assert.equal(config.baseUrl, "http://localhost:19000/remote.php/dav/files/bridge/");
+});
+
+test("webdav config rejects unsafe path-prefix segments", () => {
+  assert.throws(
+    () =>
+      parseAttachmentStorageConfig({
+        ATTACHMENT_STORAGE_DRIVER: "webdav",
+        ATTACHMENT_WEBDAV_BASE_URL: "https://cloud.example.com/remote.php/dav/files/bridge/",
+        ATTACHMENT_WEBDAV_USERNAME: "bridge-bot",
+        ATTACHMENT_WEBDAV_APP_PASSWORD: "app-password",
+        ATTACHMENT_WEBDAV_PATH_PREFIX: "Bridge/../attachments"
+      }),
+    /must not contain '\.' or '\.\.'/i
+  );
+});
