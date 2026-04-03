@@ -69,9 +69,36 @@ type UploadAttachmentResponse = {
   attachment: Attachment;
 };
 
+type BotManagementEntry = User & {
+  activeTokenCount: number;
+  lastTokenCreatedAt: string | null;
+  isBot: true;
+};
+
+type BotManagementPayload = {
+  bots: BotManagementEntry[];
+};
+
+type BotManagementResponse = {
+  bot: BotManagementEntry;
+  token: string;
+};
+
+type BotTokenRevocationResponse = {
+  bot: BotManagementEntry;
+  revokedTokenCount: number;
+};
+
 type PendingAttachment = Attachment & {
   uploadState: "uploading" | "ready" | "error";
   errorMessage?: string;
+};
+
+type BotTokenReveal = {
+  botId: string;
+  botName: string;
+  action: "created" | "rotated";
+  token: string;
 };
 
 const apiBase = import.meta.env.VITE_API_URL ?? "http://localhost:4000";
@@ -218,6 +245,11 @@ export function App() {
   const [inviteName, setInviteName] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<UserRole>("member");
+  const [botUsers, setBotUsers] = useState<BotManagementEntry[]>([]);
+  const [botDisplayName, setBotDisplayName] = useState("");
+  const [botEmail, setBotEmail] = useState("");
+  const [botRole, setBotRole] = useState<UserRole>("member");
+  const [botTokenReveal, setBotTokenReveal] = useState<BotTokenReveal | null>(null);
   const [dmPickerOpen, setDmPickerOpen] = useState(false);
   const [selectedDmUserIds, setSelectedDmUserIds] = useState<string[]>([]);
   const [membershipChannelId, setMembershipChannelId] = useState("");
@@ -419,6 +451,17 @@ export function App() {
     setEnforceMfa(payload.workspace.settings.enforceMfaForAdmins);
   }
 
+  async function loadBotManagement() {
+    const response = await fetch(`${apiBase}/admin/bots`, {
+      credentials: "include"
+    });
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as BotManagementPayload;
+    setBotUsers(payload.bots);
+  }
+
   async function loadCurrentUser() {
     const response = await fetch(`${apiBase}/auth/me`, {
       credentials: "include"
@@ -508,6 +551,8 @@ export function App() {
     setActiveThreadRootId(null);
     setPendingAttachments([]);
     setUploadingCount(0);
+    setBotUsers([]);
+    setBotTokenReveal(null);
     socketRef.current?.close();
     socketRef.current = null;
   }
@@ -688,6 +733,9 @@ export function App() {
 
   useEffect(() => {
     loadAdminOverview().catch(() => {
+      // no-op for non-admin users
+    });
+    loadBotManagement().catch(() => {
       // no-op for non-admin users
     });
   }, [currentUserId]);
@@ -926,6 +974,77 @@ export function App() {
       setInviteEmail("");
       setInviteRole("member");
       setNotice("User invited.");
+    } catch (error) {
+      setNotice((error as Error).message);
+    }
+  }
+
+  async function createBotUser() {
+    if (!botDisplayName.trim()) {
+      setNotice("Please provide a display name for the bot.");
+      return;
+    }
+
+    try {
+      const response = await adminRequest("/admin/bots", {
+        method: "POST",
+        body: JSON.stringify({
+          displayName: botDisplayName.trim(),
+          email: botEmail.trim() || undefined,
+          role: botRole
+        })
+      });
+      const payload = (await response.json()) as BotManagementResponse;
+      setBotDisplayName("");
+      setBotEmail("");
+      setBotRole("member");
+      setBotTokenReveal({
+        botId: payload.bot.id,
+        botName: payload.bot.displayName,
+        action: "created",
+        token: payload.token
+      });
+      setNotice("Bot created. Copy the token now.");
+      await loadBotManagement();
+    } catch (error) {
+      setNotice((error as Error).message);
+    }
+  }
+
+  async function rotateBotToken(botId: string) {
+    try {
+      const response = await adminRequest(`/admin/bots/${botId}/token`, {
+        method: "POST"
+      });
+      const payload = (await response.json()) as BotManagementResponse;
+      setBotTokenReveal({
+        botId: payload.bot.id,
+        botName: payload.bot.displayName,
+        action: "rotated",
+        token: payload.token
+      });
+      setNotice("Bot token rotated. Copy the new token now.");
+      await loadBotManagement();
+    } catch (error) {
+      setNotice((error as Error).message);
+    }
+  }
+
+  async function revokeBotToken(botId: string) {
+    try {
+      const response = await adminRequest(`/admin/bots/${botId}/token`, {
+        method: "DELETE"
+      });
+      const payload = (await response.json()) as BotTokenRevocationResponse;
+      if (botTokenReveal?.botId === botId) {
+        setBotTokenReveal(null);
+      }
+      setNotice(
+        payload.revokedTokenCount > 0
+          ? "Bot token revoked."
+          : "Bot had no active tokens to revoke."
+      );
+      await loadBotManagement();
     } catch (error) {
       setNotice((error as Error).message);
     }
@@ -1782,6 +1901,89 @@ export function App() {
                     Require MFA for admins
                   </label>
                   <button onClick={saveWorkspaceSettings}>Save Settings</button>
+                </article>
+              </section>
+
+              <section className="adminGrid wideGrid">
+                <article className="card">
+                  <h3>Bot Management</h3>
+                  <input
+                    value={botDisplayName}
+                    onChange={(event) => setBotDisplayName(event.target.value)}
+                    placeholder="Bot display name"
+                  />
+                  <input
+                    value={botEmail}
+                    onChange={(event) => setBotEmail(event.target.value)}
+                    placeholder="bot@company.com (optional)"
+                  />
+                  <select value={botRole} onChange={(event) => setBotRole(event.target.value as UserRole)}>
+                    {roleOrder.map((role) => (
+                      <option key={role} value={role}>
+                        {role}
+                      </option>
+                    ))}
+                  </select>
+                  <button onClick={createBotUser}>Create Bot</button>
+
+                  {botTokenReveal ? (
+                    <div className="botTokenReveal">
+                      <div className="botTokenRevealHead">
+                        <strong>
+                          {botTokenReveal.botName} token {botTokenReveal.action === "created" ? "created" : "rotated"}
+                        </strong>
+                        <span>Shown once only</span>
+                      </div>
+                      <textarea
+                        readOnly
+                        value={botTokenReveal.token}
+                        onFocus={(event) => event.currentTarget.select()}
+                      />
+                    </div>
+                  ) : (
+                    <p>New bot tokens are shown once after creation or rotation.</p>
+                  )}
+                </article>
+
+                <article className="card">
+                  <h3>Existing Bots</h3>
+                  <div className="tableList botList">
+                    {botUsers.length === 0 ? (
+                      <div className="tableRow botEmptyState">
+                        <div>
+                          <strong>No bot users yet</strong>
+                          <p>Create a bot to provision an API token and message automation.</p>
+                        </div>
+                      </div>
+                    ) : (
+                      botUsers.map((bot) => (
+                        <div className="tableRow botRow" key={bot.id}>
+                          <div className="botRowMain">
+                            <strong>{bot.displayName}</strong>
+                            <p>{bot.email}</p>
+                            <div className="botMetaRow">
+                              <span className={`pill ${bot.isActive ? "ok" : "muted"}`}>
+                                {bot.isActive ? "active" : "inactive"}
+                              </span>
+                              <span className="botMeta">{bot.role}</span>
+                              <span className="botMeta">{bot.activeTokenCount} active token{bot.activeTokenCount === 1 ? "" : "s"}</span>
+                              <span className="botMeta">
+                                {bot.lastTokenCreatedAt
+                                  ? `last token ${relativeTime(bot.lastTokenCreatedAt)}`
+                                  : "no active token"}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="rowActions botActions">
+                            <button onClick={() => rotateBotToken(bot.id)}>Rotate</button>
+                            <button className="warnBtn" onClick={() => revokeBotToken(bot.id)}>
+                              Revoke
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </article>
               </section>
 

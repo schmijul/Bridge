@@ -5,6 +5,9 @@ import type {
   AuditLogEntry,
   Channel,
   Message,
+  WorkspaceNotification,
+  WorkspaceNotificationPreferences,
+  WorkspaceNotificationType,
   PresenceState,
   ReadState,
   ServerEvent,
@@ -21,6 +24,29 @@ const persistenceEnabled = process.env.STORE_DRIVER === "postgres" && Boolean(pr
 export type AttachmentRecord = Attachment & {
   storageKey: string;
 };
+
+export type MessageSearchOptions = {
+  q?: string;
+  channelId?: string;
+  fromUserId?: string;
+  before?: string;
+  after?: string;
+  offset?: number;
+  limit?: number;
+};
+
+export type MessageSearchResult = {
+  total: number;
+  offset: number;
+  limit: number;
+  count: number;
+  nextOffset: number | null;
+  messages: Message[];
+};
+
+export type NotificationRecord = WorkspaceNotification;
+
+export type NotificationPreferencesRecord = WorkspaceNotificationPreferences;
 
 const initialWorkspace: Workspace = {
   id: workspaceId,
@@ -293,13 +319,151 @@ export const users: User[] = [];
 export const channels: Channel[] = [];
 export const messages: Message[] = [];
 export const attachments: AttachmentRecord[] = [];
+export const notifications: NotificationRecord[] = [];
 export const auditLog: AuditLogEntry[] = [];
 
 const presence = new Map<string, PresenceState>();
 const readState = new Map<string, ReadState>();
 const channelMembership = new Map<string, Set<string>>();
+const notificationPreferences = new Map<string, NotificationPreferencesRecord>();
 let sequence = 0;
 let persistQueue: Promise<void> = Promise.resolve();
+
+function defaultNotificationPreferences(userId: string): NotificationPreferencesRecord {
+  return {
+    userId,
+    mentionEnabled: true,
+    directMessageEnabled: true,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function ensureNotificationPreferencesRecord(userId: string): NotificationPreferencesRecord {
+  let preferences = notificationPreferences.get(userId);
+  if (preferences) {
+    return preferences;
+  }
+  preferences = defaultNotificationPreferences(userId);
+  notificationPreferences.set(userId, preferences);
+  enqueuePersist(async () => {
+    const db = getDbPool();
+    await db.query(
+      `INSERT INTO notification_preferences (user_id, mention_enabled, direct_message_enabled, updated_at)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id) DO NOTHING`,
+      [preferences.userId, preferences.mentionEnabled, preferences.directMessageEnabled, preferences.updatedAt]
+    );
+  });
+  return preferences;
+}
+
+export function getNotificationPreferencesForUser(userId: string): NotificationPreferencesRecord {
+  return ensureNotificationPreferencesRecord(userId);
+}
+
+export function updateNotificationPreferences(
+  userId: string,
+  patch: Partial<Pick<NotificationPreferencesRecord, "mentionEnabled" | "directMessageEnabled">>
+): NotificationPreferencesRecord {
+  const current = ensureNotificationPreferencesRecord(userId);
+  const updated: NotificationPreferencesRecord = {
+    ...current,
+    ...patch,
+    updatedAt: new Date().toISOString()
+  };
+  notificationPreferences.set(userId, updated);
+
+  enqueuePersist(async () => {
+    const db = getDbPool();
+    await db.query(
+      `INSERT INTO notification_preferences (user_id, mention_enabled, direct_message_enabled, updated_at)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id)
+       DO UPDATE SET
+         mention_enabled = EXCLUDED.mention_enabled,
+         direct_message_enabled = EXCLUDED.direct_message_enabled,
+         updated_at = EXCLUDED.updated_at`,
+      [
+        updated.userId,
+        updated.mentionEnabled,
+        updated.directMessageEnabled,
+        updated.updatedAt
+      ]
+    );
+  });
+
+  return updated;
+}
+
+export function getNotificationsForUser(
+  userId: string,
+  options?: { unreadOnly?: boolean; limit?: number; offset?: number }
+): {
+  notifications: NotificationRecord[];
+  totalCount: number;
+  unreadCount: number;
+} {
+  const visible = notifications.filter((notification) => notification.userId === userId);
+  const unreadCount = visible.filter((notification) => !notification.readAt).length;
+  const filtered = options?.unreadOnly ? visible.filter((notification) => !notification.readAt) : visible;
+  const offset = Math.max(0, options?.offset ?? 0);
+  const limit = Math.max(1, Math.min(100, options?.limit ?? 20));
+  return {
+    notifications: sortNotificationsDescending(filtered).slice(offset, offset + limit),
+    totalCount: filtered.length,
+    unreadCount
+  };
+}
+
+export function markNotificationsRead(
+  userId: string,
+  notificationIds?: string[]
+): { updatedCount: number; notifications: NotificationRecord[] } {
+  const targets = notificationIds && notificationIds.length > 0
+    ? notifications.filter(
+        (notification) =>
+          notification.userId === userId &&
+          notificationIds.includes(notification.id) &&
+          !notification.readAt
+      )
+    : notifications.filter((notification) => notification.userId === userId && !notification.readAt);
+
+  if (targets.length === 0) {
+    return { updatedCount: 0, notifications: [] };
+  }
+
+  const readAt = new Date().toISOString();
+  for (const notification of targets) {
+    notification.readAt = readAt;
+  }
+
+  const targetIds = new Set(targets.map((notification) => notification.id));
+  enqueuePersist(async () => {
+    const db = getDbPool();
+    if (notificationIds && notificationIds.length > 0) {
+      await db.query(
+        `UPDATE notifications
+         SET read_at = $3
+         WHERE user_id = $1 AND id = ANY($2::text[])`,
+        [userId, notificationIds, readAt]
+      );
+      return;
+    }
+    await db.query(
+      `UPDATE notifications
+       SET read_at = $2
+       WHERE user_id = $1 AND read_at IS NULL`,
+      [userId, readAt]
+    );
+  });
+
+  return {
+    updatedCount: targets.length,
+    notifications: sortNotificationsDescending(
+      notifications.filter((notification) => targetIds.has(notification.id))
+    )
+  };
+}
 
 function enqueuePersist(task: () => Promise<void>): void {
   if (!persistenceEnabled) {
@@ -318,6 +482,7 @@ function setInMemoryDefaults(now: string): void {
   channels.splice(0, channels.length, ...makeInitialChannels());
   messages.splice(0, messages.length, ...makeInitialMessages(now));
   attachments.splice(0, attachments.length);
+  notifications.splice(0, notifications.length);
   auditLog.splice(0, auditLog.length, ...makeInitialAuditLog(now));
   presence.clear();
   presence.set("u-1", "online");
@@ -325,6 +490,10 @@ function setInMemoryDefaults(now: string): void {
   presence.set("u-4", "away");
   readState.clear();
   channelMembership.clear();
+  notificationPreferences.clear();
+  for (const user of users) {
+    notificationPreferences.set(user.id, defaultNotificationPreferences(user.id));
+  }
   sequence = 0;
 }
 
@@ -332,11 +501,13 @@ async function seedDatabaseFromMemory(): Promise<void> {
   const db = getDbPool();
   await db.query("BEGIN");
   try {
-    await db.query("DELETE FROM read_state");
-    await db.query("DELETE FROM presence_state");
-    await db.query("DELETE FROM attachments");
-    await db.query("DELETE FROM messages");
-    await db.query("DELETE FROM audit_log");
+  await db.query("DELETE FROM read_state");
+  await db.query("DELETE FROM presence_state");
+  await db.query("DELETE FROM notifications");
+  await db.query("DELETE FROM notification_preferences");
+  await db.query("DELETE FROM attachments");
+  await db.query("DELETE FROM messages");
+  await db.query("DELETE FROM audit_log");
     await db.query("DELETE FROM channels");
     await db.query("DELETE FROM bot_api_tokens");
     await db.query("DELETE FROM users");
@@ -407,6 +578,24 @@ async function seedDatabaseFromMemory(): Promise<void> {
       );
     }
 
+    for (const notification of notifications) {
+      await db.query(
+        `INSERT INTO notifications
+          (id, user_id, type, actor_id, channel_id, message_id, read_at, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          notification.id,
+          notification.userId,
+          notification.type,
+          notification.actorId,
+          notification.channelId,
+          notification.messageId,
+          notification.readAt ?? null,
+          notification.createdAt
+        ]
+      );
+    }
+
     for (const attachment of attachments) {
       await db.query(
         `INSERT INTO attachments
@@ -424,6 +613,20 @@ async function seedDatabaseFromMemory(): Promise<void> {
           attachment.sizeBytes,
           attachment.status,
           attachment.createdAt
+        ]
+        );
+    }
+
+    for (const preference of notificationPreferences.values()) {
+      await db.query(
+        `INSERT INTO notification_preferences
+          (user_id, mention_enabled, direct_message_enabled, updated_at)
+         VALUES ($1, $2, $3, $4)`,
+        [
+          preference.userId,
+          preference.mentionEnabled,
+          preference.directMessageEnabled,
+          preference.updatedAt
         ]
       );
     }
@@ -601,6 +804,52 @@ async function loadStoreFromDatabase(): Promise<boolean> {
       .map(toPublicAttachment);
   }
 
+  const notificationsResult = await db.query<{
+    id: string;
+    user_id: string;
+    type: WorkspaceNotificationType;
+    actor_id: string;
+    channel_id: string;
+    message_id: string;
+    read_at: Date | string | null;
+    created_at: Date | string;
+  }>("SELECT * FROM notifications ORDER BY created_at DESC, id DESC");
+  notifications.splice(
+    0,
+    notifications.length,
+    ...notificationsResult.rows.map((row) => ({
+      id: row.id,
+      userId: row.user_id,
+      type: row.type,
+      actorId: row.actor_id,
+      channelId: row.channel_id,
+      messageId: row.message_id,
+      readAt: row.read_at ? new Date(row.read_at).toISOString() : undefined,
+      createdAt: new Date(row.created_at).toISOString()
+    }))
+  );
+
+  const notificationPreferencesResult = await db.query<{
+    user_id: string;
+    mention_enabled: boolean;
+    direct_message_enabled: boolean;
+    updated_at: Date | string;
+  }>("SELECT * FROM notification_preferences");
+  notificationPreferences.clear();
+  for (const row of notificationPreferencesResult.rows) {
+    notificationPreferences.set(row.user_id, {
+      userId: row.user_id,
+      mentionEnabled: row.mention_enabled,
+      directMessageEnabled: row.direct_message_enabled,
+      updatedAt: new Date(row.updated_at).toISOString()
+    });
+  }
+  for (const user of users) {
+    if (!notificationPreferences.has(user.id)) {
+      notificationPreferences.set(user.id, defaultNotificationPreferences(user.id));
+    }
+  }
+
   const auditResult = await db.query<{
     id: string;
     action: string;
@@ -708,6 +957,124 @@ function toPublicAttachment(attachment: AttachmentRecord): Attachment {
   };
 }
 
+function createNotificationRecord(input: {
+  userId: string;
+  type: WorkspaceNotificationType;
+  actorId: string;
+  channelId: string;
+  messageId: string;
+  createdAt?: string;
+}): NotificationRecord {
+  const record: NotificationRecord = {
+    id: randomUUID(),
+    userId: input.userId,
+    type: input.type,
+    actorId: input.actorId,
+    channelId: input.channelId,
+    messageId: input.messageId,
+    createdAt: input.createdAt ?? new Date().toISOString()
+  };
+  notifications.unshift(record);
+  enqueuePersist(async () => {
+    const db = getDbPool();
+    await db.query(
+      `INSERT INTO notifications
+        (id, user_id, type, actor_id, channel_id, message_id, read_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NULL, $7)`,
+      [
+        record.id,
+        record.userId,
+        record.type,
+        record.actorId,
+        record.channelId,
+        record.messageId,
+        record.createdAt
+      ]
+    );
+  });
+  return record;
+}
+
+function createNotificationsForMessage(message: Message): NotificationRecord[] {
+  const channel = channels.find((item) => item.id === message.channelId);
+  if (!channel || channel.archivedAt) {
+    return [];
+  }
+
+  const created: NotificationRecord[] = [];
+  const recipients = new Map<string, Set<WorkspaceNotificationType>>();
+
+  if (channel.kind === "dm" || channel.kind === "group_dm") {
+    for (const recipientId of getChannelMemberIds(channel.id)) {
+      if (recipientId === message.senderId) {
+        continue;
+      }
+      const recipient = getUserById(recipientId);
+      if (!recipient || !recipient.isActive || !isUserAllowedInChannel(recipientId, channel.id)) {
+        continue;
+      }
+      const prefs = ensureNotificationPreferencesRecord(recipientId);
+      if (!prefs.directMessageEnabled) {
+        continue;
+      }
+      const types = recipients.get(recipientId) ?? new Set<WorkspaceNotificationType>();
+      types.add("direct_message");
+      recipients.set(recipientId, types);
+    }
+  }
+
+  for (const mentionUserId of new Set(message.mentionUserIds ?? [])) {
+    if (mentionUserId === message.senderId) {
+      continue;
+    }
+    const recipient = getUserById(mentionUserId);
+    if (!recipient || !recipient.isActive) {
+      continue;
+    }
+    if (!isUserAllowedInChannel(mentionUserId, channel.id)) {
+      continue;
+    }
+    const prefs = ensureNotificationPreferencesRecord(mentionUserId);
+    if (!prefs.mentionEnabled) {
+      continue;
+    }
+    const types = recipients.get(mentionUserId) ?? new Set<WorkspaceNotificationType>();
+    types.add("mention");
+    recipients.set(mentionUserId, types);
+  }
+
+  for (const [recipientId, types] of recipients.entries()) {
+    for (const type of types) {
+      created.push(
+        createNotificationRecord({
+          userId: recipientId,
+          type,
+          actorId: message.senderId,
+          channelId: message.channelId,
+          messageId: message.id,
+          createdAt: message.createdAt
+        })
+      );
+    }
+  }
+
+  return created;
+}
+
+function notificationIsUnread(notification: NotificationRecord): boolean {
+  return !notification.readAt;
+}
+
+function sortNotificationsDescending(entries: NotificationRecord[]): NotificationRecord[] {
+  return [...entries].sort((a, b) => {
+    const createdAtDelta = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    if (createdAtDelta !== 0) {
+      return createdAtDelta;
+    }
+    return b.id.localeCompare(a.id);
+  });
+}
+
 function bindReadyAttachmentsForMessage(message: Message): void {
   message.attachments = attachments
     .filter((attachment) => attachment.messageId === message.id && attachment.status === "ready")
@@ -749,7 +1116,81 @@ export function getChannelsForUser(userId: string): Channel[] {
 }
 
 export function getMessagesForUser(userId: string): Message[] {
+  return getVisibleMessagesForUser(userId);
+}
+
+function getVisibleMessagesForUser(userId: string): Message[] {
   return messages.filter((message) => isUserAllowedInChannel(userId, message.channelId));
+}
+
+function compareMessagesForSearch(left: Message, right: Message): number {
+  const leftTime = new Date(left.createdAt).getTime();
+  const rightTime = new Date(right.createdAt).getTime();
+  if (leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+  return right.id.localeCompare(left.id);
+}
+
+function normalizeSearchTerm(raw: string | undefined): string | null {
+  const normalized = raw?.trim().toLowerCase() ?? "";
+  return normalized.length > 0 ? normalized : null;
+}
+
+function toTimestamp(value: string | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function searchMessagesForUser(
+  userId: string,
+  options: MessageSearchOptions
+): MessageSearchResult {
+  const q = normalizeSearchTerm(options.q);
+  const offset = options.offset ?? 0;
+  const limit = options.limit ?? 20;
+  const channelId = options.channelId?.trim() ?? "";
+  const fromUserId = options.fromUserId?.trim() ?? "";
+  const before = toTimestamp(options.before);
+  const after = toTimestamp(options.after);
+
+  const filtered = getVisibleMessagesForUser(userId)
+    .filter((message) => {
+      if (q && !message.content.toLowerCase().includes(q)) {
+        return false;
+      }
+      if (channelId && message.channelId !== channelId) {
+        return false;
+      }
+      if (fromUserId && message.senderId !== fromUserId) {
+        return false;
+      }
+      const createdAt = new Date(message.createdAt).getTime();
+      if (before !== null && !(createdAt < before)) {
+        return false;
+      }
+      if (after !== null && !(createdAt > after)) {
+        return false;
+      }
+      return true;
+    })
+    .sort(compareMessagesForSearch);
+
+  const total = filtered.length;
+  const page = filtered.slice(offset, offset + limit);
+  const nextOffset = offset + page.length < total ? offset + page.length : null;
+
+  return {
+    total,
+    offset,
+    limit,
+    count: page.length,
+    nextOffset,
+    messages: page
+  };
 }
 
 export function getAttachmentById(attachmentId: string): AttachmentRecord | undefined {
@@ -815,6 +1256,17 @@ function removeAttachmentRecordsByMessageId(messageId: string): AttachmentRecord
   const removedIds = new Set(removed.map((attachment) => attachment.id));
   const kept = attachments.filter((attachment) => !removedIds.has(attachment.id));
   attachments.splice(0, attachments.length, ...kept);
+  return removed;
+}
+
+function removeNotificationRecordsByMessageId(messageId: string): NotificationRecord[] {
+  const removed = notifications.filter((notification) => notification.messageId === messageId);
+  if (removed.length === 0) {
+    return [];
+  }
+  const removedIds = new Set(removed.map((notification) => notification.id));
+  const kept = notifications.filter((notification) => !removedIds.has(notification.id));
+  notifications.splice(0, notifications.length, ...kept);
   return removed;
 }
 
@@ -971,6 +1423,7 @@ export function addMessage(
     channelId,
     lastMessageId: message.id
   });
+  createNotificationsForMessage(message);
 
   enqueuePersist(async () => {
     const db = getDbPool();
@@ -1018,6 +1471,7 @@ export function deleteMessage(messageId: string): ServerEvent | null {
   }
   const [removedMessage] = messages.splice(index, 1);
   removeAttachmentRecordsByMessageId(messageId);
+  removeNotificationRecordsByMessageId(messageId);
 
   enqueuePersist(async () => {
     const db = getDbPool();
@@ -1277,6 +1731,8 @@ export function inviteUser(input: {
     );
   });
 
+  ensureNotificationPreferencesRecord(user.id);
+
   return {
     type: "user:updated",
     payload: { ...user, sequence: nextSequenceInternal() }
@@ -1407,11 +1863,17 @@ export function runRetentionSweep(nowIso = new Date().toISOString()): {
   const deletedAttachments = attachments.filter((attachment) =>
     attachment.messageId ? deletedIds.has(attachment.messageId) : false
   );
+  const deletedNotifications = notifications.filter((notification) => deletedIds.has(notification.messageId));
   const deletedAttachmentIdSet = new Set(deletedAttachments.map((attachment) => attachment.id));
   const keptAttachments = attachments.filter((attachment) => !deletedAttachmentIdSet.has(attachment.id));
+  const deletedNotificationIdSet = new Set(deletedNotifications.map((notification) => notification.id));
+  const keptNotifications = notifications.filter(
+    (notification) => !deletedNotificationIdSet.has(notification.id)
+  );
 
   messages.splice(0, messages.length, ...keptMessages);
   attachments.splice(0, attachments.length, ...keptAttachments);
+  notifications.splice(0, notifications.length, ...keptNotifications);
   for (const [key, state] of readState.entries()) {
     if (deletedIds.has(state.lastMessageId)) {
       readState.delete(key);

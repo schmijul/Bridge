@@ -2,13 +2,13 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import multipart from "@fastify/multipart";
+import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
-import net from "node:net";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import type { ClientEvent, ServerEvent } from "@bridge/shared";
+import type { ClientEvent, ServerEvent, User } from "@bridge/shared";
 import { getDbPool } from "./db.js";
 import {
   addMessage,
@@ -28,7 +28,10 @@ import {
   getChannelsForUser,
   getDirectConversationsForUser,
   getAdminOverview,
+  getNotificationPreferencesForUser,
+  getNotificationsForUser,
   getMessagesForUser,
+  searchMessagesForUser,
   getUnreadCountsForUser,
   isPersistenceEnabled,
   nextSequence,
@@ -42,6 +45,8 @@ import {
   setPresence,
   setReadState,
   unlinkPendingAttachment,
+  markNotificationsRead,
+  updateNotificationPreferences,
   runRetentionSweep,
   setUserActive,
   typingChanged,
@@ -61,12 +66,19 @@ import {
   safeFilename
 } from "./attachments.js";
 import {
+  createEncryptedAttachmentStorage,
+  parseAttachmentEncryptionConfig
+} from "./attachment-encryption.js";
+import { createRealtimeCoordinator } from "./realtime.js";
+import {
   createBotToken,
   createSession,
   deleteSession,
   deleteSessionsForUser,
+  getBotTokenSummary,
   getUserIdFromBotToken,
   getUserIdFromSession,
+  revokeBotTokens,
   setPassword,
   verifyPassword
 } from "./auth.js";
@@ -143,6 +155,10 @@ const createBotSchema = z.object({
   role: z.enum(["admin", "manager", "member", "guest"]).default("member")
 });
 
+const botManagementParamsSchema = z.object({
+  botUserId: z.string().min(1)
+});
+
 const updateUserRoleSchema = z.object({
   role: z.enum(["admin", "manager", "member", "guest"])
 });
@@ -173,6 +189,22 @@ const botMessageSchema = z.object({
   threadRootMessageId: z.string().min(1).optional()
 });
 
+const notificationQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  offset: z.coerce.number().int().min(0).default(0),
+  unreadOnly: z.enum(["true", "false"]).optional()
+});
+
+const notificationReadSchema = z.object({
+  notificationIds: z.array(z.string().uuid()).max(100).optional(),
+  all: z.boolean().optional()
+});
+
+const notificationPreferencesSchema = z.object({
+  mentionEnabled: z.boolean().optional(),
+  directMessageEnabled: z.boolean().optional()
+});
+
 type RateLimitDecision = {
   allowed: boolean;
   retryAfterSeconds: number;
@@ -185,6 +217,18 @@ type OidcRoleGroups = {
   manager: Set<string>;
   member: Set<string>;
   guest: Set<string>;
+};
+
+type BotManagementEntry = {
+  id: string;
+  displayName: string;
+  email: string;
+  role: "admin" | "manager" | "member" | "guest";
+  isActive: boolean;
+  isBot?: boolean;
+  lastSeenAt: string;
+  activeTokenCount: number;
+  lastTokenCreatedAt: string | null;
 };
 
 type CounterMap = Map<string, number>;
@@ -252,6 +296,20 @@ function envBoolean(name: string, fallback: boolean): boolean {
     return false;
   }
   return fallback;
+}
+
+function normalizeRequestId(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) {
+    return null;
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim();
+  if (normalized.length === 0 || normalized.length > 128) {
+    return null;
+  }
+  return /^[A-Za-z0-9._:-]+$/.test(normalized) ? normalized : null;
 }
 
 function normalizeSameSite(raw: string | undefined): "lax" | "strict" | "none" {
@@ -332,45 +390,6 @@ function renderPrometheusCounters(counters: CounterMap): string {
     lines.push(`bridge_events_total{event=\"${name}\"} ${value}`);
   }
   return `${lines.join("\n")}\n`;
-}
-
-async function checkRedisReadiness(redisUrl: string | undefined): Promise<{
-  configured: boolean;
-  ok: boolean;
-  detail: string;
-}> {
-  if (!redisUrl) {
-    return { configured: false, ok: false, detail: "not configured" };
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(redisUrl);
-  } catch {
-    return { configured: true, ok: false, detail: "invalid REDIS_URL" };
-  }
-
-  const host = parsed.hostname;
-  const port = Number.parseInt(parsed.port || "6379", 10);
-  const timeoutMs = 1500;
-
-  return await new Promise((resolvePromise) => {
-    const socket = net.createConnection({ host, port });
-    let settled = false;
-
-    const finalize = (ok: boolean, detail: string) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      socket.destroy();
-      resolvePromise({ configured: true, ok, detail });
-    };
-
-    socket.setTimeout(timeoutMs);
-    socket.on("connect", () => finalize(true, "reachable"));
-    socket.on("timeout", () => finalize(false, "timeout"));
-    socket.on("error", (error) => finalize(false, `unreachable: ${error.message}`));
-  });
 }
 
 function getClientAddress(request: FastifyRequest, trustProxyHeaders: boolean): string {
@@ -541,6 +560,21 @@ async function requireAuthenticated(
   return { ok: true, actorId };
 }
 
+async function serializeBotUser(botUser: User): Promise<BotManagementEntry> {
+  const summary = await getBotTokenSummary(botUser.id);
+  return {
+    id: botUser.id,
+    displayName: botUser.displayName,
+    email: botUser.email,
+    role: botUser.role,
+    isActive: botUser.isActive,
+    isBot: botUser.isBot ?? true,
+    lastSeenAt: botUser.lastSeenAt,
+    activeTokenCount: summary.activeTokenCount,
+    lastTokenCreatedAt: summary.lastTokenCreatedAt
+  };
+}
+
 export async function createBridgeApp(
   corsOrigin: string,
   options?: {
@@ -608,10 +642,15 @@ export async function createBridgeApp(
     member: parseGroupSet(options?.auth?.roleGroups?.member ?? process.env.OIDC_ROLE_GROUP_MEMBER),
     guest: parseGroupSet(options?.auth?.roleGroups?.guest ?? process.env.OIDC_ROLE_GROUP_GUEST)
   };
-  const attachmentStorage = createAttachmentStorage(parseAttachmentStorageConfig(process.env));
+  const attachmentStorageBase = createAttachmentStorage(parseAttachmentStorageConfig(process.env));
+  const attachmentEncryptionConfig = parseAttachmentEncryptionConfig(process.env);
+  const attachmentStorage = attachmentEncryptionConfig
+    ? createEncryptedAttachmentStorage(attachmentStorageBase, attachmentEncryptionConfig)
+    : attachmentStorageBase;
   const attachmentScanner = createAttachmentScanner(parseAttachmentScannerConfig(process.env));
   const attachmentMaxBytes = envNumber("ATTACHMENT_MAX_SIZE_BYTES", 25 * 1024 * 1024);
   const blockedAttachmentExtensions = parseBlockedExtensions(process.env.ATTACHMENT_BLOCKED_EXTENSIONS);
+  const realtime = await createRealtimeCoordinator(process.env.REDIS_URL);
   const corsAllowList = parseCorsOrigins(corsOrigin);
   const corsOriginMatcher =
     corsAllowList.length <= 1
@@ -624,11 +663,18 @@ export async function createBridgeApp(
           cb(null, corsAllowList.includes(origin));
         };
 
-  const app = Fastify({ logger: { level: "info" } });
+  const app = Fastify({
+    logger: { level: "info" },
+    genReqId: (request) => normalizeRequestId(request.headers["x-request-id"]) ?? randomUUID()
+  });
   await app.register(cors, { origin: corsOriginMatcher, credentials: true });
   await app.register(cookie);
   await app.register(multipart);
+  app.addHook("onClose", async () => {
+    await realtime.close();
+  });
   app.addHook("onSend", async (_request, reply, payload) => {
+    reply.header("x-request-id", reply.request.id);
     reply.header("x-content-type-options", "nosniff");
     reply.header("x-frame-options", "DENY");
     reply.header("referrer-policy", "no-referrer");
@@ -700,6 +746,10 @@ export async function createBridgeApp(
   }
 
   function broadcast(event: ServerEvent): void {
+    realtime.publish(event);
+  }
+
+  const sendToSockets = (event: ServerEvent): void => {
     const encoded = JSON.stringify(event);
     for (const socket of sockets) {
       const actorId = socketActorId.get(socket);
@@ -714,6 +764,22 @@ export async function createBridgeApp(
         socket.send(encoded);
       }
     }
+  };
+
+  function serializeNotification(notification: ReturnType<typeof getNotificationsForUser>["notifications"][number]) {
+    const actor = getUserById(notification.actorId);
+    const channel = channels.find((entry) => entry.id === notification.channelId);
+    const message = messages.find((entry) => entry.id === notification.messageId);
+    return {
+      ...notification,
+      actorDisplayName: actor?.displayName ?? notification.actorId,
+      actorIsBot: actor?.isBot ?? false,
+      channelName: channel?.name ?? "unknown",
+      channelKind: channel?.kind ?? "channel",
+      messageContent: message?.content ?? null,
+      messageCreatedAt: message?.createdAt ?? null,
+      isUnread: !notification.readAt
+    };
   }
 
   app.get("/health", async () => {
@@ -766,7 +832,7 @@ export async function createBridgeApp(
       }
     }
 
-    const redisStatus = await checkRedisReadiness(process.env.REDIS_URL);
+    const redisStatus = realtime.status();
     const response = {
       ok: storeStatus.ok && (!redisStatus.configured || redisStatus.ok),
       timestamp: new Date().toISOString(),
@@ -1138,33 +1204,61 @@ export async function createBridgeApp(
     }
 
     const querySchema = z.object({
-      q: z.string().trim().min(2).max(120),
+      q: z.string().trim().min(1).max(120).optional(),
+      channelId: z.string().trim().min(1).optional(),
+      fromUserId: z.string().trim().min(1).optional(),
+      before: z.string().datetime().optional(),
+      after: z.string().datetime().optional(),
+      offset: z.coerce.number().int().min(0).max(5000).default(0),
       limit: z.coerce.number().int().min(1).max(100).default(20)
     });
     const parsed = querySchema.safeParse(request.query);
     if (!parsed.success) {
       return reply.code(400).send({ message: "invalid search query" });
     }
+    const hasSearchTerm =
+      Boolean(parsed.data.q?.trim()) ||
+      Boolean(parsed.data.channelId) ||
+      Boolean(parsed.data.fromUserId) ||
+      Boolean(parsed.data.before) ||
+      Boolean(parsed.data.after);
+    if (!hasSearchTerm) {
+      return reply.code(400).send({ message: "invalid search query" });
+    }
 
-    const q = parsed.data.q.toLowerCase();
-    const results = messages
-      .filter((message) => isUserAllowedInChannel(auth.actorId, message.channelId))
-      .filter((message) => message.content.toLowerCase().includes(q))
-      .slice(-parsed.data.limit)
-      .reverse()
-      .map((message) => {
-        const sender = getUserById(message.senderId);
-        const channel = channels.find((entry) => entry.id === message.channelId);
-        return {
-          ...message,
-          senderDisplayName: sender?.displayName ?? message.senderId,
-          channelName: channel?.name ?? "unknown"
-        };
-      });
+    const search = searchMessagesForUser(auth.actorId, {
+      q: parsed.data.q,
+      channelId: parsed.data.channelId,
+      fromUserId: parsed.data.fromUserId,
+      before: parsed.data.before,
+      after: parsed.data.after,
+      offset: parsed.data.offset,
+      limit: parsed.data.limit
+    });
+    const results = search.messages.map((message) => {
+      const sender = getUserById(message.senderId);
+      const channel = channels.find((entry) => entry.id === message.channelId);
+      return {
+        ...message,
+        senderDisplayName: sender?.displayName ?? message.senderId,
+        channelName: channel?.name ?? "unknown"
+      };
+    });
 
     return {
-      query: parsed.data.q,
-      count: results.length,
+      query: parsed.data.q ?? null,
+      filters: {
+        channelId: parsed.data.channelId ?? null,
+        fromUserId: parsed.data.fromUserId ?? null,
+        before: parsed.data.before ?? null,
+        after: parsed.data.after ?? null
+      },
+      offset: search.offset,
+      limit: search.limit,
+      count: search.count,
+      total: search.total,
+      nextOffset: search.nextOffset,
+      hasMore: search.nextOffset !== null,
       results
     };
   });
@@ -1229,6 +1323,110 @@ export async function createBridgeApp(
     return {
       totalUnread: counts.reduce((acc, item) => acc + item.unreadCount, 0),
       channels: counts
+    };
+  });
+
+  app.get("/notifications", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const parsed = notificationQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid notifications query" });
+    }
+
+    const notificationsResult = getNotificationsForUser(auth.actorId, {
+      limit: parsed.data.limit,
+      offset: parsed.data.offset,
+      unreadOnly: parsed.data.unreadOnly === "true"
+    });
+
+    return {
+      limit: parsed.data.limit,
+      offset: parsed.data.offset,
+      unreadOnly: parsed.data.unreadOnly === "true",
+      totalCount: notificationsResult.totalCount,
+      unreadCount: notificationsResult.unreadCount,
+      preferences: getNotificationPreferencesForUser(auth.actorId),
+      notifications: notificationsResult.notifications.map(serializeNotification)
+    };
+  });
+
+  app.post("/notifications/read", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const parsed = notificationReadSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid notification read payload" });
+    }
+    if (!parsed.data.all && (!parsed.data.notificationIds || parsed.data.notificationIds.length === 0)) {
+      return reply.code(400).send({ message: "notificationIds or all=true is required" });
+    }
+
+    const result = markNotificationsRead(
+      auth.actorId,
+      parsed.data.all ? undefined : parsed.data.notificationIds
+    );
+
+    return {
+      ok: true,
+      updatedCount: result.updatedCount,
+      unreadCount: getNotificationsForUser(auth.actorId).unreadCount,
+      notifications: result.notifications.map(serializeNotification)
+    };
+  });
+
+  app.get("/notifications/preferences", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+    return {
+      preferences: getNotificationPreferencesForUser(auth.actorId)
+    };
+  });
+
+  app.patch("/notifications/preferences", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const parsed = notificationPreferencesSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid notification preferences payload" });
+    }
+    if (
+      parsed.data.mentionEnabled === undefined &&
+      parsed.data.directMessageEnabled === undefined
+    ) {
+      return reply.code(400).send({ message: "at least one preference must be provided" });
+    }
+
+    const preferences = updateNotificationPreferences(auth.actorId, parsed.data);
+    return {
+      preferences
     };
   });
 
@@ -1608,7 +1806,90 @@ export async function createBridgeApp(
     broadcast(botEvent);
     broadcast(auditEvent);
 
-    return reply.code(201).send({ bot: botEvent.payload, token });
+    const bot = await serializeBotUser(botEvent.payload);
+    return reply.code(201).send({ bot, token });
+  });
+
+  app.get("/admin/bots", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const botUsers = users
+      .filter((user) => user.isBot)
+      .slice()
+      .sort((left, right) => left.displayName.localeCompare(right.displayName));
+    const bots = await Promise.all(botUsers.map((botUser) => serializeBotUser(botUser)));
+    return { bots };
+  });
+
+  app.post("/admin/bots/:botUserId/token", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const params = botManagementParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ message: "invalid bot parameter payload" });
+    }
+    const botUser = getUserById(params.data.botUserId);
+    if (!botUser || !botUser.isBot) {
+      return reply.code(404).send({ message: "bot user not found" });
+    }
+
+    const token = await createBotToken(botUser.id, { replaceExisting: true });
+    const auditEvent = appendAuditLog({
+      action: "bot.token.rotated",
+      actorId: auth.actorId,
+      targetType: "user",
+      targetId: botUser.id,
+      summary: `Rotated bot token for ${botUser.displayName}`
+    });
+    broadcast(auditEvent);
+    const bot = await serializeBotUser(botUser);
+    return reply.code(200).send({ bot, token });
+  });
+
+  app.delete("/admin/bots/:botUserId/token", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const params = botManagementParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ message: "invalid bot parameter payload" });
+    }
+    const botUser = getUserById(params.data.botUserId);
+    if (!botUser || !botUser.isBot) {
+      return reply.code(404).send({ message: "bot user not found" });
+    }
+
+    const revokedTokenCount = await revokeBotTokens(botUser.id);
+    const auditEvent = appendAuditLog({
+      action: "bot.token.revoked",
+      actorId: auth.actorId,
+      targetType: "user",
+      targetId: botUser.id,
+      summary: `Revoked ${revokedTokenCount} bot token${revokedTokenCount === 1 ? "" : "s"} for ${botUser.displayName}`
+    });
+    broadcast(auditEvent);
+    const bot = await serializeBotUser(botUser);
+    return { bot, revokedTokenCount };
   });
 
   app.patch("/admin/users/:userId/role", async (request, reply) => {
@@ -1861,6 +2142,7 @@ export async function createBridgeApp(
 
   const attachRealtime = () => {
     const wss = new WebSocketServer({ server: app.server });
+    realtime.subscribe(sendToSockets);
 
     wss.on("connection", async (socket, request) => {
       const requestLike = { headers: request.headers } as FastifyRequest;

@@ -478,6 +478,23 @@ test("readiness endpoint returns dependency shape", async (t) => {
   assert.equal(body.dependencies.redis.configured, false);
 });
 
+test("api responses echo request ids", async (t) => {
+  const app = await makeApp();
+  t.after(async () => {
+    await app.close();
+  });
+
+  const requestId = "bridge-observability-test";
+  const response = await app.inject({
+    method: "GET",
+    url: "/ready",
+    headers: { "x-request-id": requestId }
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["x-request-id"], requestId);
+});
+
 test("readiness endpoint fails when configured redis is unreachable", async (t) => {
   const previousRedisUrl = process.env.REDIS_URL;
   process.env.REDIS_URL = "redis://127.0.0.1:1";

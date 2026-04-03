@@ -51,7 +51,15 @@ type S3StorageConfig = {
   secretAccessKey: string;
 };
 
-export type AttachmentStorageConfig = LocalStorageConfig | S3StorageConfig;
+type WebDavStorageConfig = {
+  driver: "webdav";
+  baseUrl: string;
+  username: string;
+  appPassword: string;
+  pathPrefix: string;
+};
+
+export type AttachmentStorageConfig = LocalStorageConfig | S3StorageConfig | WebDavStorageConfig;
 
 type NoopScannerConfig = {
   mode: "none";
@@ -64,6 +72,10 @@ type CommandScannerConfig = {
 };
 
 export type AttachmentScannerConfig = NoopScannerConfig | CommandScannerConfig;
+
+export type AttachmentStorageDependencies = {
+  fetch?: typeof fetch;
+};
 
 export function parseBlockedExtensions(raw: string | undefined): Set<string> {
   const fallback = ["bat", "cmd", "com", "cpl", "exe", "js", "mjs", "cjs", "msi", "ps1", "scr", "sh", "vbs"];
@@ -92,6 +104,20 @@ export function parseAttachmentStorageConfig(env: NodeJS.ProcessEnv): Attachment
       region: env.ATTACHMENT_S3_REGION ?? "us-east-1",
       accessKeyId: env.ATTACHMENT_S3_ACCESS_KEY_ID,
       secretAccessKey: env.ATTACHMENT_S3_SECRET_ACCESS_KEY
+    };
+  }
+  if (driver === "webdav") {
+    if (!env.ATTACHMENT_WEBDAV_BASE_URL || !env.ATTACHMENT_WEBDAV_USERNAME || !env.ATTACHMENT_WEBDAV_APP_PASSWORD) {
+      throw new Error(
+        "ATTACHMENT_STORAGE_DRIVER=webdav requires ATTACHMENT_WEBDAV_BASE_URL, ATTACHMENT_WEBDAV_USERNAME and ATTACHMENT_WEBDAV_APP_PASSWORD"
+      );
+    }
+    return {
+      driver: "webdav",
+      baseUrl: env.ATTACHMENT_WEBDAV_BASE_URL,
+      username: env.ATTACHMENT_WEBDAV_USERNAME,
+      appPassword: env.ATTACHMENT_WEBDAV_APP_PASSWORD,
+      pathPrefix: normalizePathPrefix(env.ATTACHMENT_WEBDAV_PATH_PREFIX ?? "bridge/attachments")
     };
   }
   return {
@@ -150,7 +176,10 @@ export function createAttachmentScanner(config: AttachmentScannerConfig): Attach
   };
 }
 
-export function createAttachmentStorage(config: AttachmentStorageConfig): AttachmentStorage {
+export function createAttachmentStorage(
+  config: AttachmentStorageConfig,
+  deps: AttachmentStorageDependencies = {}
+): AttachmentStorage {
   if (config.driver === "s3") {
     const client = new S3Client({
       endpoint: config.endpoint,
@@ -208,6 +237,9 @@ export function createAttachmentStorage(config: AttachmentStorageConfig): Attach
       }
     };
   }
+  if (config.driver === "webdav") {
+    return createWebDavAttachmentStorage(config, deps.fetch);
+  }
 
   return {
     async upload(input) {
@@ -231,6 +263,135 @@ export function createAttachmentStorage(config: AttachmentStorageConfig): Attach
         sizeBytes = buffer.length;
       }
       return { stream: Readable.from(buffer), sizeBytes };
+    }
+  };
+}
+
+function normalizePathPrefix(raw: string): string {
+  return raw
+    .split("/")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .join("/");
+}
+
+function splitPathSegments(value: string): string[] {
+  return value
+    .split("/")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function encodePathSegments(segments: string[]): string {
+  return segments.map((segment) => encodeURIComponent(segment)).join("/");
+}
+
+function normalizeBaseUrl(baseUrl: string): URL {
+  const url = new URL(baseUrl);
+  if (!url.pathname.endsWith("/")) {
+    url.pathname = `${url.pathname}/`;
+  }
+  url.search = "";
+  url.hash = "";
+  return url;
+}
+
+function buildWebDavUrl(baseUrl: string, ...segments: string[]): URL {
+  const normalizedBase = normalizeBaseUrl(baseUrl);
+  const path = encodePathSegments(segments.flatMap((segment) => splitPathSegments(segment)));
+  return new URL(path.length > 0 ? path : ".", normalizedBase);
+}
+
+function webdavAuthHeader(username: string, appPassword: string): string {
+  return `Basic ${Buffer.from(`${username}:${appPassword}`, "utf8").toString("base64")}`;
+}
+
+async function expectWebDavStatus(
+  response: Response,
+  allowedStatuses: number[],
+  context: string
+): Promise<Response> {
+  if (allowedStatuses.includes(response.status)) {
+    return response;
+  }
+  const body = await response.text().catch(() => "");
+  const suffix = body.trim().length > 0 ? `: ${body.trim()}` : "";
+  throw new Error(`${context} failed with HTTP ${response.status}${suffix}`);
+}
+
+function createWebDavAttachmentStorage(
+  config: WebDavStorageConfig,
+  fetchImpl: typeof fetch = globalThis.fetch.bind(globalThis)
+): AttachmentStorage {
+  if (typeof fetchImpl !== "function") {
+    throw new Error("fetch is required for WebDAV attachment storage");
+  }
+  const authHeader = webdavAuthHeader(config.username, config.appPassword);
+
+  async function ensureCollections(): Promise<void> {
+    const segments = splitPathSegments(config.pathPrefix);
+    if (segments.length === 0) {
+      return;
+    }
+    const created: string[] = [];
+    for (const segment of segments) {
+      created.push(segment);
+      const collectionUrl = buildWebDavUrl(config.baseUrl, created.join("/"));
+      const response = await fetchImpl(collectionUrl, {
+        method: "MKCOL",
+        headers: {
+          Authorization: authHeader
+        }
+      });
+      await expectWebDavStatus(response, [200, 201, 204, 405, 409], "WebDAV MKCOL");
+    }
+  }
+
+  function buildStorageUrl(storageKey: string): URL {
+    return buildWebDavUrl(config.baseUrl, storageKey);
+  }
+
+  return {
+    async upload(input) {
+      const storageSuffix = `${randomUUID()}-${safeFilename(input.originalName)}`;
+      const storageKey = normalizePathPrefix([config.pathPrefix, storageSuffix].filter(Boolean).join("/"));
+      await ensureCollections();
+      const response = await fetchImpl(buildStorageUrl(storageKey), {
+        method: "PUT",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": input.mimeType
+        },
+        body: new Uint8Array(input.bytes)
+      });
+      await expectWebDavStatus(response, [200, 201, 204], "WebDAV PUT");
+      return { storageKey, sizeBytes: input.bytes.length };
+    },
+    async removeByKey(storageKey) {
+      const response = await fetchImpl(buildStorageUrl(storageKey), {
+        method: "DELETE",
+        headers: {
+          Authorization: authHeader
+        }
+      });
+      await expectWebDavStatus(response, [200, 202, 204, 404], "WebDAV DELETE");
+    },
+    async readByKey(storageKey) {
+      const response = await fetchImpl(buildStorageUrl(storageKey), {
+        method: "GET",
+        headers: {
+          Authorization: authHeader
+        }
+      });
+      await expectWebDavStatus(response, [200], "WebDAV GET");
+      const contentType = response.headers.get("content-type") ?? undefined;
+      const contentLength = response.headers.get("content-length");
+      const buffer = Buffer.from(await response.arrayBuffer());
+      return {
+        stream: Readable.from(buffer),
+        sizeBytes: contentLength ? Number.parseInt(contentLength, 10) : buffer.length,
+        mimeType: contentType
+      };
     }
   };
 }
