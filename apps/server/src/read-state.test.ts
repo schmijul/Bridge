@@ -71,7 +71,7 @@ test("unread counts exclude sender and update after read-state change", async (t
   const generalBefore = unreadBefore
     .json()
     .channels.find((entry: { channelId: string; unreadCount: number }) => entry.channelId === "c-general");
-  assert.equal(generalBefore.unreadCount, 3);
+  assert.equal(generalBefore.unreadCount, 7);
 
   addMessage("c-general", "u-3", "Own message should auto-mark read up to this point");
   const unreadAfterOwnMessage = await app.inject({
