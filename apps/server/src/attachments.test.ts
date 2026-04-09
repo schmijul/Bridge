@@ -76,7 +76,7 @@ async function makeApp(
   } else {
     delete process.env.ATTACHMENT_SCAN_COMMAND;
   }
-  const { app } = await createBridgeApp("http://localhost:5173");
+  const { app } = await createBridgeApp("http://localhost:5173", { security: { csrfEnabled: false } });
   return { app, uploadDir };
 }
 

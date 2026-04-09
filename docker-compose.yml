@@ -6,9 +6,10 @@ services:
     environment:
       POSTGRES_DB: bridge
       POSTGRES_USER: bridge
-      POSTGRES_PASSWORD: bridge
+      # SECURITY: Change this password in production deployments
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bridge-dev-only}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - bridge-postgres:/var/lib/postgresql/data
 
@@ -16,8 +17,17 @@ services:
     image: redis:7-alpine
     container_name: bridge-redis
     restart: unless-stopped
+    # SECURITY: Set REDIS_PASSWORD env var in production deployments
+    command: >
+      sh -c 'if [ -n "$$REDIS_PASSWORD" ]; then
+        redis-server --requirepass "$$REDIS_PASSWORD";
+      else
+        redis-server;
+      fi'
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - bridge-redis:/data
 

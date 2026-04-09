@@ -2,7 +2,7 @@ import { z } from "zod";
 import { createBridgeApp } from "./app.js";
 import { runMigrations } from "./db.js";
 import { initStore, users } from "./store.js";
-import { initAuth } from "./auth.js";
+import { initAuth, startSessionCleanup } from "./auth.js";
 
 const envSchema = z.object({
   PORT: z.coerce.number().default(4000),
@@ -29,5 +29,6 @@ const { app, attachRealtime } = await createBridgeApp(env.CORS_ORIGIN, {
 });
 const server = await app.listen({ port: env.PORT, host: "0.0.0.0" });
 attachRealtime();
+startSessionCleanup();
 
 app.log.info(`Bridge API listening on ${server}`);

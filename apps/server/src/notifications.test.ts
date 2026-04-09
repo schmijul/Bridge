@@ -8,7 +8,7 @@ import { addMessage, createDirectConversation, resetStore, users } from "./store
 async function makeApp() {
   resetStore();
   await initAuth(users);
-  const { app } = await createBridgeApp("http://localhost:5173");
+  const { app } = await createBridgeApp("http://localhost:5173", { security: { csrfEnabled: false } });
   return app;
 }
 

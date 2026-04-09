@@ -129,6 +129,7 @@ export async function verifyPassword(userId: string, password: string): Promise<
 export async function setPassword(userId: string, password: string): Promise<void> {
   const hash = await bcrypt.hash(password, 10);
   passwordByUserId.set(userId, hash);
+  await deleteSessionsForUser(userId);
   if (!persistenceEnabled) {
     return;
   }
@@ -331,4 +332,32 @@ export async function deleteSessionsForUser(userId: string): Promise<void> {
   }
   const db = getDbPool();
   await db.query("DELETE FROM sessions WHERE user_id = $1", [userId]);
+}
+
+let sessionCleanupTimer: NodeJS.Timeout | null = null;
+
+export function startSessionCleanup(intervalMs = 60_000): void {
+  if (sessionCleanupTimer) {
+    return;
+  }
+  sessionCleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [sessionId, session] of sessionById.entries()) {
+      if (new Date(session.expiresAt).getTime() <= now) {
+        sessionById.delete(sessionId);
+      }
+    }
+    if (persistenceEnabled) {
+      const db = getDbPool();
+      db.query("DELETE FROM sessions WHERE expires_at <= NOW()").catch(() => {});
+    }
+  }, intervalMs);
+  sessionCleanupTimer.unref?.();
+}
+
+export function stopSessionCleanup(): void {
+  if (sessionCleanupTimer) {
+    clearInterval(sessionCleanupTimer);
+    sessionCleanupTimer = null;
+  }
 }

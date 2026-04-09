@@ -7,7 +7,7 @@ import { messages, resetStore, users, workspace } from "./store.js";
 async function makeApp() {
   resetStore();
   await initAuth(users);
-  const { app } = await createBridgeApp("http://localhost:5173");
+  const { app } = await createBridgeApp("http://localhost:5173", { security: { csrfEnabled: false } });
   return app;
 }
 
@@ -17,7 +17,8 @@ async function makeSecureApp() {
   const { app } = await createBridgeApp("http://localhost:5173", {
     security: {
       sessionCookieSecure: true,
-      sessionCookieSameSite: "strict"
+      sessionCookieSameSite: "strict",
+      csrfEnabled: false
     }
   });
   return app;
@@ -27,6 +28,7 @@ async function makeOidcApp() {
   resetStore();
   await initAuth(users);
   const { app } = await createBridgeApp("http://localhost:5173", {
+    security: { csrfEnabled: false },
     auth: {
       mode: "oidc",
       oidcEmailHeader: "x-test-email",
