@@ -149,6 +149,7 @@ npm run dev:mobile
 - `ATTACHMENT_BLOCKED_EXTENSIONS` overrides blocked executable/script extensions
 - For `ATTACHMENT_STORAGE_DRIVER=s3`, configure `ATTACHMENT_S3_BUCKET`, `ATTACHMENT_S3_REGION`, optional `ATTACHMENT_S3_ENDPOINT`, `ATTACHMENT_S3_KEY_PREFIX`, `ATTACHMENT_S3_FORCE_PATH_STYLE`, `ATTACHMENT_S3_ACCESS_KEY_ID`, and `ATTACHMENT_S3_SECRET_ACCESS_KEY`
 - For `ATTACHMENT_STORAGE_DRIVER=webdav`, configure `ATTACHMENT_WEBDAV_BASE_URL`, `ATTACHMENT_WEBDAV_USERNAME`, `ATTACHMENT_WEBDAV_APP_PASSWORD`, and optional `ATTACHMENT_WEBDAV_PATH_PREFIX`
+- `ATTACHMENT_WEBDAV_BASE_URL` must use `https`; set `ATTACHMENT_WEBDAV_ALLOW_INSECURE=true` only for loopback development URLs such as `http://localhost` or `http://[::1]`
 - Use a Nextcloud app password for `ATTACHMENT_WEBDAV_APP_PASSWORD`, not the primary account password
 - `PUSH_DELIVERY_ENABLED=true` enables async notification push delivery worker
 - `PUSH_DELIVERY_PROVIDER=webhook` sends delivery jobs to `PUSH_DELIVERY_WEBHOOK_URL` via HTTP `POST`
