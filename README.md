@@ -197,6 +197,10 @@ Admin endpoints are protected by role and require a valid session cookie.
 - `POST /notifications/read` with `{ all?: boolean, notificationIds?: string[] }` (session required)
 - `GET /notifications/preferences` (session required)
 - `PATCH /notifications/preferences` with `{ mentionEnabled?, directMessageEnabled? }` (session required)
+- `POST /read-state` updates `read_state`, optionally marks notifications up to the provided `lastMessageId`, and returns both notification and workspace unread counters plus the most recent notification frames
+- `PUT /me/push-devices/:installationId` registers or updates a push device token (`platform`, `provider`, `pushToken`, optional metadata) for the authenticated user
+- `DELETE /me/push-devices/:installationId` marks a previously registered device as disabled
+- `GET /me/push-devices` lists devices registered for the authenticated user
 - Notifications currently cover in-app mention and direct-message activity only; push delivery is still an open follow-up
 
 ## Readiness API

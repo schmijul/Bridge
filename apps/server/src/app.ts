@@ -33,6 +33,7 @@ import {
   getMessagesForUser,
   searchMessagesForUser,
   getUnreadCountsForUser,
+  getUnreadNotificationCountsForUser,
   isPersistenceEnabled,
   nextSequence,
   getOnlineUserIds,
@@ -46,7 +47,11 @@ import {
   setReadState,
   unlinkPendingAttachment,
   markNotificationsRead,
+  markNotificationsReadUpToMessage,
   updateNotificationPreferences,
+  registerPushDevice,
+  unregisterPushDevice,
+  getPushDevicesForUser,
   runRetentionSweep,
   setUserActive,
   typingChanged,
@@ -213,6 +218,24 @@ const notificationReadSchema = z.object({
 const notificationPreferencesSchema = z.object({
   mentionEnabled: z.boolean().optional(),
   directMessageEnabled: z.boolean().optional()
+});
+
+const pushDeviceSchema = z.object({
+  platform: z.string().trim().min(1),
+  provider: z.enum(["expo", "fcm", "apns"]),
+  pushToken: z.string().trim().min(1),
+  appVersion: z.string().trim().optional(),
+  deviceName: z.string().trim().optional(),
+  osVersion: z.string().trim().optional(),
+  timezone: z.string().trim().optional(),
+  locale: z.string().trim().optional(),
+  metadata: z.record(z.unknown()).optional()
+});
+
+const readStateSyncSchema = z.object({
+  channelId: z.string().min(1),
+  lastMessageId: z.string().min(1),
+  markNotificationsReadUpToMessage: z.boolean().optional()
 });
 
 type RateLimitDecision = {
@@ -1522,6 +1545,110 @@ export async function createBridgeApp(
       unreadCount: getNotificationsForUser(auth.actorId).unreadCount,
       notifications: result.notifications.map(serializeNotification)
     };
+  });
+
+  app.post("/read-state", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const parsed = readStateSyncSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid read state payload" });
+    }
+
+    setReadState(auth.actorId, parsed.data.channelId, parsed.data.lastMessageId);
+
+    if (parsed.data.markNotificationsReadUpToMessage !== false) {
+      markNotificationsReadUpToMessage(auth.actorId, parsed.data.channelId, parsed.data.lastMessageId);
+    }
+
+    const notificationsResult = getNotificationsForUser(auth.actorId);
+    const unreadCounts = getUnreadNotificationCountsForUser(auth.actorId);
+    const totalUnread = unreadCounts.reduce((acc, item) => acc + item.unreadCount, 0);
+
+    return {
+      ok: true,
+      readState: {
+        channelId: parsed.data.channelId,
+        lastMessageId: parsed.data.lastMessageId
+      },
+      notificationUnreadCount: notificationsResult.unreadCount,
+      workspaceUnread: {
+        totalUnread,
+        channels: unreadCounts
+      },
+      notifications: notificationsResult.notifications.map(serializeNotification)
+    };
+  });
+
+  app.put("/me/push-devices/:installationId", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const { installationId: rawInstallationId } = request.params as { installationId?: string };
+    const installationId = (rawInstallationId ?? "").toString().trim();
+    if (installationId.length === 0) {
+      return reply.code(400).send({ message: "installationId is required" });
+    }
+    const parsed = pushDeviceSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid push device payload" });
+    }
+
+    const device = registerPushDevice(auth.actorId, installationId, {
+      provider: parsed.data.provider,
+      platform: parsed.data.platform,
+      deviceToken: parsed.data.pushToken,
+      appVersion: parsed.data.appVersion,
+      deviceName: parsed.data.deviceName,
+      osVersion: parsed.data.osVersion,
+      timezone: parsed.data.timezone,
+      locale: parsed.data.locale,
+      metadata: parsed.data.metadata
+    });
+    return { ok: true, device };
+  });
+
+  app.delete("/me/push-devices/:installationId", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+    const { installationId: rawInstallationId } = request.params as { installationId?: string };
+    const installationId = (rawInstallationId ?? "").toString().trim();
+    if (installationId.length === 0) {
+      return reply.code(400).send({ message: "installationId is required" });
+    }
+    const removed = unregisterPushDevice(auth.actorId, installationId);
+    return { ok: true, removed };
+  });
+
+  app.get("/me/push-devices", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+    return { devices: getPushDevicesForUser(auth.actorId) };
   });
 
   app.get("/notifications/preferences", async (request, reply) => {
