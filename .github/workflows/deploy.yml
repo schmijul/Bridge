@@ -1,0 +1,79 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      image_tag:
+        description: "Optional override image tag (defaults to sha-<commit>)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      resolved_tag: ${{ steps.meta.outputs.resolved_tag }}
+      registry: ${{ steps.meta.outputs.registry }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve image tag
+        id: meta
+        run: |
+          SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-12)"
+          TAG_INPUT="${{ inputs.image_tag }}"
+          if [[ -n "${TAG_INPUT}" ]]; then
+            RESOLVED_TAG="${TAG_INPUT}"
+          else
+            RESOLVED_TAG="sha-${SHORT_SHA}"
+          fi
+          OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          REGISTRY="ghcr.io/${OWNER_LC}"
+          echo "registry=${REGISTRY}" >> "$GITHUB_OUTPUT"
+          echo "resolved_tag=${RESOLVED_TAG}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push bridge-server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/server/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.registry }}/bridge-server:${{ steps.meta.outputs.resolved_tag }}
+      - name: Build and push bridge-web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.registry }}/bridge-web:${{ steps.meta.outputs.resolved_tag }}
+          build-args: |
+            VITE_API_URL=${{ vars.VITE_API_URL || 'https://api.example.com' }}
+            VITE_WS_URL=${{ vars.VITE_WS_URL || 'wss://api.example.com' }}
+
+  deploy-template:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Deployment placeholder
+        run: |
+          echo "Ready to deploy to ${{ inputs.environment }}"
+          echo "Server image: ${{ needs.build-and-push.outputs.registry }}/bridge-server:${{ needs.build-and-push.outputs.resolved_tag }}"
+          echo "Web image: ${{ needs.build-and-push.outputs.registry }}/bridge-web:${{ needs.build-and-push.outputs.resolved_tag }}"
+          echo "Replace this step with your target platform deployment command (Kubernetes, ECS, Fly.io, etc.)."

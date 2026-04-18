@@ -245,6 +245,12 @@ type RateLimitDecision = {
 
 type AuthMode = "local" | "oidc";
 
+type BuildMetadata = {
+  commitSha: string;
+  buildTime: string;
+  analyticsEnabled: boolean;
+};
+
 type OidcRoleGroups = {
   admin: Set<string>;
   manager: Set<string>;
@@ -638,6 +644,7 @@ export async function createBridgeApp(
         guest?: string;
       };
     };
+    build?: Partial<BuildMetadata>;
   }
 ): Promise<{
   app: FastifyInstance;
@@ -679,6 +686,11 @@ export async function createBridgeApp(
     manager: parseGroupSet(options?.auth?.roleGroups?.manager ?? process.env.OIDC_ROLE_GROUP_MANAGER),
     member: parseGroupSet(options?.auth?.roleGroups?.member ?? process.env.OIDC_ROLE_GROUP_MEMBER),
     guest: parseGroupSet(options?.auth?.roleGroups?.guest ?? process.env.OIDC_ROLE_GROUP_GUEST)
+  };
+  const buildMetadata: BuildMetadata = {
+    commitSha: options?.build?.commitSha ?? "dev",
+    buildTime: options?.build?.buildTime ?? new Date().toISOString(),
+    analyticsEnabled: options?.build?.analyticsEnabled ?? false
   };
   const attachmentStorageBase = createAttachmentStorage(parseAttachmentStorageConfig(process.env));
   const attachmentEncryptionConfig = parseAttachmentEncryptionConfig(process.env);
@@ -888,7 +900,13 @@ export async function createBridgeApp(
   }
 
   app.get("/health", async () => {
-    return { ok: true };
+    return {
+      ok: true,
+      commitSha: buildMetadata.commitSha,
+      buildTime: buildMetadata.buildTime,
+      analyticsEnabled: buildMetadata.analyticsEnabled,
+      uptime: process.uptime()
+    };
   });
 
   app.get("/metrics", async (request, reply) => {

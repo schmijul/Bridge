@@ -12,6 +12,12 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - bridge-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
@@ -30,6 +36,55 @@ services:
       - "127.0.0.1:6379:6379"
     volumes:
       - bridge-redis:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "if [ -n \"$$REDIS_PASSWORD\" ]; then redis-cli -a \"$$REDIS_PASSWORD\" ping; else redis-cli ping; fi"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  bridge-server:
+    container_name: bridge-server
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    env_file:
+      - .env.docker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:4000/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+
+  bridge-web:
+    container_name: bridge-web
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:4000}
+        VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:4000}
+    depends_on:
+      bridge-server:
+        condition: service_healthy
+    ports:
+      - "8080:80"
 
 volumes:
   bridge-postgres:

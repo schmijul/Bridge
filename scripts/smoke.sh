@@ -17,7 +17,7 @@ echo "[smoke] start server"
 LOG_FILE="/tmp/bridge-smoke-server.log"
 (
   cd apps/server
-  PORT=4010 CORS_ORIGIN=http://localhost:5173 npm run start
+  PORT=4010 CORS_ORIGIN=http://localhost:5173 SEED_DEFAULT_PASSWORDS=true npm run start
 ) > "$LOG_FILE" 2>&1 &
 SERVER_PID=$!
 

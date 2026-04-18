@@ -1,0 +1,7 @@
+node_modules
+dist
+.env*
+.git
+apps/web
+apps/desktop
+apps/mobile

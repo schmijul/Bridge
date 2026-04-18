@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json && mkdir -p dist && ../../scripts/build-meta.sh dist/build-meta.json",
     "start": "node dist/apps/server/src/index.js",
     "db:migrate": "tsx src/migrate.ts",
-    "test": "tsx --test src/*.test.ts && tsc -p tsconfig.json --noEmit",
+    "test": "SEED_DEFAULT_PASSWORDS=true tsx --test src/*.test.ts && tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
