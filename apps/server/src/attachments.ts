@@ -87,6 +87,11 @@ export function parseBlockedExtensions(raw: string | undefined): Set<string> {
   return new Set(values);
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
 export function parseAttachmentStorageConfig(env: NodeJS.ProcessEnv): AttachmentStorageConfig {
   const driver = (env.ATTACHMENT_STORAGE_DRIVER ?? "local").trim().toLowerCase();
   if (driver === "s3") {
@@ -112,9 +117,16 @@ export function parseAttachmentStorageConfig(env: NodeJS.ProcessEnv): Attachment
         "ATTACHMENT_STORAGE_DRIVER=webdav requires ATTACHMENT_WEBDAV_BASE_URL, ATTACHMENT_WEBDAV_USERNAME and ATTACHMENT_WEBDAV_APP_PASSWORD"
       );
     }
+    const parsedBaseUrl = new URL(env.ATTACHMENT_WEBDAV_BASE_URL);
+    const allowInsecure = (env.ATTACHMENT_WEBDAV_ALLOW_INSECURE ?? "false").trim().toLowerCase() === "true";
+    if (parsedBaseUrl.protocol !== "https:" && !(allowInsecure && isLoopbackHostname(parsedBaseUrl.hostname))) {
+      throw new Error(
+        "ATTACHMENT_WEBDAV_BASE_URL must use https unless ATTACHMENT_WEBDAV_ALLOW_INSECURE=true for localhost loopback development"
+      );
+    }
     return {
       driver: "webdav",
-      baseUrl: env.ATTACHMENT_WEBDAV_BASE_URL,
+      baseUrl: parsedBaseUrl.toString(),
       username: env.ATTACHMENT_WEBDAV_USERNAME,
       appPassword: env.ATTACHMENT_WEBDAV_APP_PASSWORD,
       pathPrefix: normalizePathPrefix(env.ATTACHMENT_WEBDAV_PATH_PREFIX ?? "bridge/attachments")

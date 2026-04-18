@@ -1,0 +1,20 @@
+services:
+  postgres:
+    restart: always
+    ports: !reset []
+
+  redis:
+    restart: always
+    ports: !reset []
+
+  bridge-server:
+    restart: always
+    ports: !reset []
+    expose:
+      - "4000"
+
+  bridge-web:
+    restart: always
+    ports: !reset []
+    expose:
+      - "80"

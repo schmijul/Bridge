@@ -7,7 +7,7 @@ import { resetStore, users } from "./store.js";
 async function makeApp() {
   resetStore();
   await initAuth(users);
-  const { app } = await createBridgeApp("http://localhost:5173");
+  const { app } = await createBridgeApp("http://localhost:5173", { security: { csrfEnabled: false } });
   return app;
 }
 

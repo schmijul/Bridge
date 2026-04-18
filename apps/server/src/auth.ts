@@ -24,6 +24,24 @@ const devDefaultPasswords: Record<string, string> = {
   "u-4": "bridge123!"
 };
 
+function envBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (!value) {
+    return fallback;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
+function seedDefaultPasswordsEnabled(): boolean {
+  return envBoolean(process.env.SEED_DEFAULT_PASSWORDS, false);
+}
+
 async function persistSession(
   sessionId: string,
   userId: string,
@@ -42,20 +60,23 @@ async function persistSession(
 }
 
 export async function initAuth(users: User[]): Promise<void> {
+  const seedDefaults = seedDefaultPasswordsEnabled();
   if (persistenceEnabled) {
     const db = getDbPool();
-    for (const user of users) {
-      const defaultPassword = devDefaultPasswords[user.id];
-      if (!defaultPassword) {
-        continue;
+    if (seedDefaults) {
+      for (const user of users) {
+        const defaultPassword = devDefaultPasswords[user.id];
+        if (!defaultPassword) {
+          continue;
+        }
+        const hash = await bcrypt.hash(defaultPassword, 10);
+        await db.query(
+          `INSERT INTO user_credentials (user_id, password_hash)
+           VALUES ($1, $2)
+           ON CONFLICT (user_id) DO NOTHING`,
+          [user.id, hash]
+        );
       }
-      const hash = await bcrypt.hash(defaultPassword, 10);
-      await db.query(
-        `INSERT INTO user_credentials (user_id, password_hash)
-         VALUES ($1, $2)
-         ON CONFLICT (user_id) DO NOTHING`,
-        [user.id, hash]
-      );
     }
 
     const credentials = await db.query<{ user_id: string; password_hash: string }>(
@@ -113,8 +134,11 @@ export async function initAuth(users: User[]): Promise<void> {
     if (user.isBot) {
       continue;
     }
-    const password = devDefaultPasswords[user.id] ?? "welcome123";
-    passwordByUserId.set(user.id, await bcrypt.hash(password, 10));
+    const defaultPassword = seedDefaults ? devDefaultPasswords[user.id] : undefined;
+    if (!defaultPassword) {
+      continue;
+    }
+    passwordByUserId.set(user.id, await bcrypt.hash(defaultPassword, 10));
   }
 }
 
@@ -129,6 +153,7 @@ export async function verifyPassword(userId: string, password: string): Promise<
 export async function setPassword(userId: string, password: string): Promise<void> {
   const hash = await bcrypt.hash(password, 10);
   passwordByUserId.set(userId, hash);
+  await deleteSessionsForUser(userId);
   if (!persistenceEnabled) {
     return;
   }
@@ -331,4 +356,32 @@ export async function deleteSessionsForUser(userId: string): Promise<void> {
   }
   const db = getDbPool();
   await db.query("DELETE FROM sessions WHERE user_id = $1", [userId]);
+}
+
+let sessionCleanupTimer: NodeJS.Timeout | null = null;
+
+export function startSessionCleanup(intervalMs = 60_000): void {
+  if (sessionCleanupTimer) {
+    return;
+  }
+  sessionCleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [sessionId, session] of sessionById.entries()) {
+      if (new Date(session.expiresAt).getTime() <= now) {
+        sessionById.delete(sessionId);
+      }
+    }
+    if (persistenceEnabled) {
+      const db = getDbPool();
+      db.query("DELETE FROM sessions WHERE expires_at <= NOW()").catch(() => {});
+    }
+  }, intervalMs);
+  sessionCleanupTimer.unref?.();
+}
+
+export function stopSessionCleanup(): void {
+  if (sessionCleanupTimer) {
+    clearInterval(sessionCleanupTimer);
+    sessionCleanupTimer = null;
+  }
 }

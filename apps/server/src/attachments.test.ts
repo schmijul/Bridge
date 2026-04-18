@@ -76,7 +76,7 @@ async function makeApp(
   } else {
     delete process.env.ATTACHMENT_SCAN_COMMAND;
   }
-  const { app } = await createBridgeApp("http://localhost:5173");
+  const { app } = await createBridgeApp("http://localhost:5173", { security: { csrfEnabled: false } });
   return { app, uploadDir };
 }
 
@@ -398,4 +398,63 @@ test("webdav attachment storage uploads, reads and deletes via WebDAV semantics"
   );
   assert.match(calls[2]!.headers.authorization, /^Basic /);
   assert.equal(calls[2]!.headers["content-type"], "text/plain");
+});
+
+test("webdav storage config requires https by default", () => {
+  assert.throws(
+    () =>
+      parseAttachmentStorageConfig({
+        ATTACHMENT_STORAGE_DRIVER: "webdav",
+        ATTACHMENT_WEBDAV_BASE_URL: "http://cloud.example.com/remote.php/dav/files/bridge/",
+        ATTACHMENT_WEBDAV_USERNAME: "bridge-bot",
+        ATTACHMENT_WEBDAV_APP_PASSWORD: "super-secret-token"
+      }),
+    /must use https/i
+  );
+});
+
+test("webdav storage config allows insecure loopback urls when explicitly enabled", () => {
+  const localhostConfig = parseAttachmentStorageConfig({
+    ATTACHMENT_STORAGE_DRIVER: "webdav",
+    ATTACHMENT_WEBDAV_BASE_URL: "http://localhost:8080/remote.php/dav/files/bridge/",
+    ATTACHMENT_WEBDAV_USERNAME: "bridge-bot",
+    ATTACHMENT_WEBDAV_APP_PASSWORD: "super-secret-token",
+    ATTACHMENT_WEBDAV_ALLOW_INSECURE: "true"
+  });
+  assert.equal(localhostConfig.driver, "webdav");
+  assert.equal(localhostConfig.baseUrl, "http://localhost:8080/remote.php/dav/files/bridge/");
+
+  const ipv4Config = parseAttachmentStorageConfig({
+    ATTACHMENT_STORAGE_DRIVER: "webdav",
+    ATTACHMENT_WEBDAV_BASE_URL: "http://127.0.0.1:8080/remote.php/dav/files/bridge/",
+    ATTACHMENT_WEBDAV_USERNAME: "bridge-bot",
+    ATTACHMENT_WEBDAV_APP_PASSWORD: "super-secret-token",
+    ATTACHMENT_WEBDAV_ALLOW_INSECURE: "true"
+  });
+  assert.equal(ipv4Config.driver, "webdav");
+  assert.equal(ipv4Config.baseUrl, "http://127.0.0.1:8080/remote.php/dav/files/bridge/");
+
+  const ipv6Config = parseAttachmentStorageConfig({
+    ATTACHMENT_STORAGE_DRIVER: "webdav",
+    ATTACHMENT_WEBDAV_BASE_URL: "http://[::1]:8080/remote.php/dav/files/bridge/",
+    ATTACHMENT_WEBDAV_USERNAME: "bridge-bot",
+    ATTACHMENT_WEBDAV_APP_PASSWORD: "super-secret-token",
+    ATTACHMENT_WEBDAV_ALLOW_INSECURE: "true"
+  });
+  assert.equal(ipv6Config.driver, "webdav");
+  assert.equal(ipv6Config.baseUrl, "http://[::1]:8080/remote.php/dav/files/bridge/");
+});
+
+test("webdav storage config still rejects insecure non-loopback urls", () => {
+  assert.throws(
+    () =>
+      parseAttachmentStorageConfig({
+        ATTACHMENT_STORAGE_DRIVER: "webdav",
+        ATTACHMENT_WEBDAV_BASE_URL: "http://192.168.1.10:8080/remote.php/dav/files/bridge/",
+        ATTACHMENT_WEBDAV_USERNAME: "bridge-bot",
+        ATTACHMENT_WEBDAV_APP_PASSWORD: "super-secret-token",
+        ATTACHMENT_WEBDAV_ALLOW_INSECURE: "true"
+      }),
+    /must use https/i
+  );
 });

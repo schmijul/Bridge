@@ -14,7 +14,7 @@ async function makeAppWithRateLimits(rateLimit: {
 }) {
   resetStore();
   await initAuth(users);
-  const { app } = await createBridgeApp("http://localhost:5173", { rateLimit });
+  const { app } = await createBridgeApp("http://localhost:5173", { rateLimit, security: { csrfEnabled: false } });
   return { app };
 }
 

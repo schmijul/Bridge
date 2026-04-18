@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import test from "node:test";
 import { createBridgeApp } from "./app.js";
 import { initAuth } from "./auth.js";
-import { addMessage, createDirectConversation, resetStore, users } from "./store.js";
+import { addMessage, createDirectConversation, resetStore, users, messages } from "./store.js";
 
 async function makeApp() {
   resetStore();
   await initAuth(users);
-  const { app } = await createBridgeApp("http://localhost:5173");
+  const { app } = await createBridgeApp("http://localhost:5173", { security: { csrfEnabled: false } });
   return app;
 }
 
@@ -135,4 +136,192 @@ test("notification preferences control delivery and persist updates", async (t) 
   assert.equal(prefsRead.statusCode, 200);
   assert.equal(prefsRead.json().preferences.mentionEnabled, false);
   assert.equal(prefsRead.json().preferences.directMessageEnabled, true);
+});
+
+test("read-state sync endpoint marks channel notifications and returns unread counters", async (t) => {
+  const app = await makeApp();
+  t.after(async () => {
+    await app.close();
+  });
+
+  const ninaSession = await loginAs(app, "nina@bridge.local", "bridge123!");
+  addMessage("c-general", "u-2", "Please review @Nina the spec.", {
+    mentionUserIds: ["u-3"]
+  });
+  const messageId = messages.find((message) =>
+    message.content.includes("Please review @Nina the spec.")
+  )?.id;
+  assert.ok(messageId);
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/read-state",
+    cookies: { bridge_session: ninaSession },
+    payload: {
+      channelId: "c-general",
+      lastMessageId: messageId,
+      markNotificationsReadUpToMessage: true
+    }
+  });
+  assert.equal(response.statusCode, 200);
+  const body = response.json();
+  assert.equal(body.notificationUnreadCount, 0);
+  assert.equal(body.workspaceUnread.totalUnread, 0);
+  assert.ok(Array.isArray(body.workspaceUnread.channels));
+  assert.equal(body.workspaceUnread.channels.find((channel: { channelId: string }) => channel.channelId === "c-general")?.unreadCount, 0);
+});
+
+test("push device registration lifecycle and listing", async (t) => {
+  const app = await makeApp();
+  t.after(async () => {
+    await app.close();
+  });
+
+  const ninaSession = await loginAs(app, "nina@bridge.local", "bridge123!");
+  const installationId = "install-123";
+  const register = await app.inject({
+    method: "PUT",
+    url: `/me/push-devices/${installationId}`,
+    cookies: { bridge_session: ninaSession },
+    payload: {
+      platform: "android",
+      provider: "expo",
+      pushToken: "ExponentPushToken[abc123]",
+      appVersion: "2.0.1",
+      deviceName: "Nina's Pixel",
+      osVersion: "Android 14",
+      timezone: "Europe/Berlin",
+      locale: "de-DE",
+      metadata: { sku: "beta" }
+    }
+  });
+  assert.equal(register.statusCode, 200);
+  const device = register.json().device;
+  assert.equal(device.installationId, installationId);
+  assert.equal(device.enabled, true);
+
+  const listAfter = await app.inject({
+    method: "GET",
+    url: "/me/push-devices",
+    cookies: { bridge_session: ninaSession }
+  });
+  assert.equal(listAfter.statusCode, 200);
+  assert.equal(listAfter.json().devices.length, 1);
+
+  const unregister = await app.inject({
+    method: "DELETE",
+    url: `/me/push-devices/${installationId}`,
+    cookies: { bridge_session: ninaSession }
+  });
+  assert.equal(unregister.statusCode, 200);
+  assert.equal(unregister.json().removed, true);
+
+  const listFinal = await app.inject({
+    method: "GET",
+    url: "/me/push-devices",
+    cookies: { bridge_session: ninaSession }
+  });
+  assert.equal(listFinal.statusCode, 200);
+  assert.equal(listFinal.json().devices!.length, 1);
+  assert.equal(listFinal.json().devices[0].enabled, false);
+});
+
+test("delivery queue exposes admin status and can deliver notifications via webhook runner", async (t) => {
+  const previous = {
+    enabled: process.env.PUSH_DELIVERY_ENABLED,
+    webhookUrl: process.env.PUSH_DELIVERY_WEBHOOK_URL,
+    pollInterval: process.env.PUSH_DELIVERY_POLL_INTERVAL_MS
+  };
+  const receivedPayloads: Array<{ notificationId: string; userId: string; type: string }> = [];
+  const server = createServer((req, res) => {
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end("method not allowed");
+      return;
+    }
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    req.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
+      receivedPayloads.push(JSON.parse(body) as { notificationId: string; userId: string; type: string });
+      res.statusCode = 202;
+      res.end("accepted");
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  process.env.PUSH_DELIVERY_ENABLED = "true";
+  process.env.PUSH_DELIVERY_WEBHOOK_URL = `http://127.0.0.1:${address.port}/push`;
+  process.env.PUSH_DELIVERY_POLL_INTERVAL_MS = "600000";
+
+  const app = await makeApp();
+  t.after(async () => {
+    await app.close();
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+    if (previous.enabled === undefined) {
+      delete process.env.PUSH_DELIVERY_ENABLED;
+    } else {
+      process.env.PUSH_DELIVERY_ENABLED = previous.enabled;
+    }
+    if (previous.webhookUrl === undefined) {
+      delete process.env.PUSH_DELIVERY_WEBHOOK_URL;
+    } else {
+      process.env.PUSH_DELIVERY_WEBHOOK_URL = previous.webhookUrl;
+    }
+    if (previous.pollInterval === undefined) {
+      delete process.env.PUSH_DELIVERY_POLL_INTERVAL_MS;
+    } else {
+      process.env.PUSH_DELIVERY_POLL_INTERVAL_MS = previous.pollInterval;
+    }
+  });
+
+  const ninaSession = await loginAs(app, "nina@bridge.local", "bridge123!");
+  const alexSession = await loginAs(app, "alex@bridge.local", "bridge123!");
+  addMessage("c-general", "u-2", "Heads up @Nina, please review.", {
+    mentionUserIds: ["u-3"]
+  });
+  const dm = createDirectConversation("u-1", ["u-3"]);
+  addMessage(dm.channel.id, "u-1", "Delivery queue DM");
+
+  const statusBefore = await app.inject({
+    method: "GET",
+    url: "/admin/notifications/delivery",
+    cookies: { bridge_session: alexSession }
+  });
+  assert.equal(statusBefore.statusCode, 200);
+  assert.equal(statusBefore.json().enabled, true);
+  assert.equal(statusBefore.json().stats.pendingCount, 2);
+
+  const run = await app.inject({
+    method: "POST",
+    url: "/admin/notifications/delivery/run",
+    cookies: { bridge_session: alexSession }
+  });
+  assert.equal(run.statusCode, 200);
+  assert.equal(run.json().result.claimed, 2);
+  assert.equal(run.json().result.delivered, 2);
+  assert.equal(run.json().status.stats.pendingCount, 0);
+  assert.equal(run.json().status.stats.deliveredCount, 2);
+
+  assert.equal(receivedPayloads.length, 2);
+  assert.ok(receivedPayloads.every((entry) => entry.userId === "u-3"));
+  assert.deepEqual(
+    receivedPayloads.map((entry) => entry.type).sort(),
+    ["direct_message", "mention"]
+  );
+
+  const notificationsAfter = await app.inject({
+    method: "GET",
+    url: "/notifications",
+    cookies: { bridge_session: ninaSession }
+  });
+  assert.equal(notificationsAfter.statusCode, 200);
+  assert.equal(notificationsAfter.json().unreadCount, 2);
 });

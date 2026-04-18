@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import multipart from "@fastify/multipart";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -33,6 +33,7 @@ import {
   getMessagesForUser,
   searchMessagesForUser,
   getUnreadCountsForUser,
+  getUnreadNotificationCountsForUser,
   isPersistenceEnabled,
   nextSequence,
   getOnlineUserIds,
@@ -46,7 +47,11 @@ import {
   setReadState,
   unlinkPendingAttachment,
   markNotificationsRead,
+  markNotificationsReadUpToMessage,
   updateNotificationPreferences,
+  registerPushDevice,
+  unregisterPushDevice,
+  getPushDevicesForUser,
   runRetentionSweep,
   setUserActive,
   typingChanged,
@@ -55,6 +60,7 @@ import {
   users,
   workspace
 } from "./store.js";
+import { createPushDeliveryRunner, parsePushDeliveryConfig } from "./push-delivery.js";
 import {
   createAttachmentScanner,
   createAttachmentStorage,
@@ -174,9 +180,18 @@ const updateWorkspaceSchema = z.object({
   enforceMfaForAdmins: z.boolean().optional()
 });
 
+const passwordSchema = z
+  .string()
+  .min(10)
+  .max(256)
+  .regex(/[a-z]/, "password must contain a lowercase letter")
+  .regex(/[A-Z]/, "password must contain an uppercase letter")
+  .regex(/[0-9]/, "password must contain a digit")
+  .regex(/[^a-zA-Z0-9]/, "password must contain a special character");
+
 const loginSchema = z.object({
   email: z.string().trim().email(),
-  password: z.string().min(8).max(256)
+  password: z.string().min(1).max(256)
 });
 
 const createConversationSchema = z.object({
@@ -205,12 +220,36 @@ const notificationPreferencesSchema = z.object({
   directMessageEnabled: z.boolean().optional()
 });
 
+const pushDeviceSchema = z.object({
+  platform: z.string().trim().min(1),
+  provider: z.enum(["expo", "fcm", "apns"]),
+  pushToken: z.string().trim().min(1),
+  appVersion: z.string().trim().optional(),
+  deviceName: z.string().trim().optional(),
+  osVersion: z.string().trim().optional(),
+  timezone: z.string().trim().optional(),
+  locale: z.string().trim().optional(),
+  metadata: z.record(z.unknown()).optional()
+});
+
+const readStateSyncSchema = z.object({
+  channelId: z.string().min(1),
+  lastMessageId: z.string().min(1),
+  markNotificationsReadUpToMessage: z.boolean().optional()
+});
+
 type RateLimitDecision = {
   allowed: boolean;
   retryAfterSeconds: number;
 };
 
 type AuthMode = "local" | "oidc";
+
+type BuildMetadata = {
+  commitSha: string;
+  buildTime: string;
+  analyticsEnabled: boolean;
+};
 
 type OidcRoleGroups = {
   admin: Set<string>;
@@ -591,6 +630,7 @@ export async function createBridgeApp(
       sessionCookieSecure?: boolean;
       sessionCookieSameSite?: "lax" | "strict" | "none";
       sessionCookieDomain?: string;
+      csrfEnabled?: boolean;
     };
     auth?: {
       mode?: AuthMode;
@@ -604,6 +644,7 @@ export async function createBridgeApp(
         guest?: string;
       };
     };
+    build?: Partial<BuildMetadata>;
   }
 ): Promise<{
   app: FastifyInstance;
@@ -636,11 +677,20 @@ export async function createBridgeApp(
   )
     .toLowerCase()
     .trim();
+  const oidcProxySecret = (process.env.OIDC_PROXY_SECRET ?? "").trim();
+  const oidcProxySecretHeader = (process.env.OIDC_PROXY_SECRET_HEADER ?? "x-proxy-secret")
+    .toLowerCase()
+    .trim();
   const oidcRoleGroups: OidcRoleGroups = {
     admin: parseGroupSet(options?.auth?.roleGroups?.admin ?? process.env.OIDC_ROLE_GROUP_ADMIN),
     manager: parseGroupSet(options?.auth?.roleGroups?.manager ?? process.env.OIDC_ROLE_GROUP_MANAGER),
     member: parseGroupSet(options?.auth?.roleGroups?.member ?? process.env.OIDC_ROLE_GROUP_MEMBER),
     guest: parseGroupSet(options?.auth?.roleGroups?.guest ?? process.env.OIDC_ROLE_GROUP_GUEST)
+  };
+  const buildMetadata: BuildMetadata = {
+    commitSha: options?.build?.commitSha ?? "dev",
+    buildTime: options?.build?.buildTime ?? new Date().toISOString(),
+    analyticsEnabled: options?.build?.analyticsEnabled ?? false
   };
   const attachmentStorageBase = createAttachmentStorage(parseAttachmentStorageConfig(process.env));
   const attachmentEncryptionConfig = parseAttachmentEncryptionConfig(process.env);
@@ -651,6 +701,25 @@ export async function createBridgeApp(
   const attachmentMaxBytes = envNumber("ATTACHMENT_MAX_SIZE_BYTES", 25 * 1024 * 1024);
   const blockedAttachmentExtensions = parseBlockedExtensions(process.env.ATTACHMENT_BLOCKED_EXTENSIONS);
   const realtime = await createRealtimeCoordinator(process.env.REDIS_URL);
+  const pushDelivery = createPushDeliveryRunner(parsePushDeliveryConfig(process.env), {
+    onResult(result) {
+      if (result.claimed > 0) {
+        incrementCounter(counters, "push.claimed", result.claimed);
+      }
+      if (result.delivered > 0) {
+        incrementCounter(counters, "push.delivered", result.delivered);
+      }
+      if (result.retried > 0) {
+        incrementCounter(counters, "push.retried", result.retried);
+      }
+      if (result.failedTerminal > 0) {
+        incrementCounter(counters, "push.failed_terminal", result.failedTerminal);
+      }
+      if (result.errors > 0) {
+        incrementCounter(counters, "push.errors", result.errors);
+      }
+    }
+  });
   const corsAllowList = parseCorsOrigins(corsOrigin);
   const corsOriginMatcher =
     corsAllowList.length <= 1
@@ -671,6 +740,7 @@ export async function createBridgeApp(
   await app.register(cookie);
   await app.register(multipart);
   app.addHook("onClose", async () => {
+    pushDelivery.stop();
     await realtime.close();
   });
   app.addHook("onSend", async (_request, reply, payload) => {
@@ -685,6 +755,44 @@ export async function createBridgeApp(
       reply.header("strict-transport-security", hsts);
     }
     return payload;
+  });
+
+  const counters: CounterMap = new Map<string, number>();
+  const csrfExemptPaths = new Set([
+    "/auth/login",
+    "/auth/oidc/login",
+    "/auth/logout",
+    "/bots/messages",
+    "/health",
+    "/ready",
+    "/metrics",
+    "/auth/mode"
+  ]);
+  const csrfEnabled = options?.security?.csrfEnabled ?? envBoolean("CSRF_PROTECTION_ENABLED", true);
+  app.addHook("onRequest", async (request, reply) => {
+    if (!csrfEnabled) {
+      return;
+    }
+    const method = request.method.toUpperCase();
+    if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+      return;
+    }
+    if (csrfExemptPaths.has(request.url.split("?")[0]!)) {
+      return;
+    }
+    const authHeader = request.headers.authorization;
+    if (typeof authHeader === "string" && authHeader.toLowerCase().startsWith("bearer ")) {
+      return;
+    }
+    const sessionId = sessionIdFromCookie(request.headers.cookie);
+    if (!sessionId) {
+      return;
+    }
+    const csrfHeader = request.headers["x-bridge-csrf"];
+    if (csrfHeader !== "1") {
+      incrementCounter(counters, "security.csrf.blocked");
+      return reply.code(403).send({ message: "missing or invalid CSRF header" });
+    }
   });
 
   const sockets = new Set<WebSocket>();
@@ -702,7 +810,7 @@ export async function createBridgeApp(
     options?.rateLimit?.apiMax ?? envNumber("API_RATE_LIMIT_MAX", 180),
     options?.rateLimit?.apiWindowMs ?? envNumber("API_RATE_LIMIT_WINDOW_MS", 60 * 1000)
   );
-  const counters: CounterMap = new Map<string, number>();
+  pushDelivery.start();
   app.addHook("onResponse", async (_request, reply) => {
     incrementCounter(counters, "http.responses.total");
     incrementCounter(counters, `http.responses.status.${reply.statusCode}`);
@@ -782,42 +890,37 @@ export async function createBridgeApp(
     };
   }
 
-  app.get("/health", async () => {
-    let buildMeta: Record<string, unknown> = { note: "build metadata unavailable" };
-    const currentDir = dirname(fileURLToPath(import.meta.url));
-    const candidates = [
-      resolve(currentDir, "../../../build-meta.json"),
-      resolve(process.cwd(), "dist/build-meta.json")
-    ];
-    try {
-      for (const metaPath of candidates) {
-        try {
-          buildMeta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
-          break;
-        } catch {
-          // try next path candidate
-        }
-      }
-    } catch {
-      // This endpoint stays valid in dev before first build.
+  const opsToken = (process.env.OPS_BEARER_TOKEN ?? "").trim();
+  function isOpsAuthorized(request: FastifyRequest): boolean {
+    if (opsToken.length === 0) {
+      return true;
     }
+    const token = bearerTokenFromAuthorizationHeader(request.headers.authorization);
+    return token === opsToken;
+  }
 
+  app.get("/health", async () => {
     return {
       ok: true,
-      privacy: {
-        analyticsEnabled: false,
-        piiLogging: "minimal"
-      },
-      build: buildMeta
+      commitSha: buildMetadata.commitSha,
+      buildTime: buildMetadata.buildTime,
+      analyticsEnabled: buildMetadata.analyticsEnabled,
+      uptime: process.uptime()
     };
   });
 
-  app.get("/metrics", async (_request, reply) => {
+  app.get("/metrics", async (request, reply) => {
+    if (!isOpsAuthorized(request)) {
+      return reply.code(401).send({ message: "unauthorized" });
+    }
     reply.header("content-type", "text/plain; version=0.0.4; charset=utf-8");
     return reply.send(renderPrometheusCounters(counters));
   });
 
-  app.get("/ready", async (_request, reply) => {
+  app.get("/ready", async (request, reply) => {
+    if (!isOpsAuthorized(request)) {
+      return reply.code(401).send({ message: "unauthorized" });
+    }
     const storeDriver = isPersistenceEnabled() ? "postgres" : "memory";
     let storeStatus: { ok: boolean; detail: string } = { ok: true, detail: "memory store active" };
     if (isPersistenceEnabled()) {
@@ -858,8 +961,21 @@ export async function createBridgeApp(
     if (limited) {
       return limited;
     }
+    const actor = getUserById(auth.actorId);
+    const isPrivileged = actor?.role === "admin" || actor?.role === "manager";
+    const sanitizedUsers = isPrivileged
+      ? users
+      : users.map((user) => ({
+          id: user.id,
+          displayName: user.displayName,
+          email: undefined,
+          role: user.role,
+          isActive: user.isActive,
+          isBot: user.isBot,
+          lastSeenAt: user.lastSeenAt
+        }));
     return {
-      users,
+      users: sanitizedUsers,
       channels: getChannelsForUser(auth.actorId),
       messages: getMessagesForUser(auth.actorId),
       onlineUserIds: getOnlineUserIds(),
@@ -1016,9 +1132,11 @@ export async function createBridgeApp(
     }
     const stored = await attachmentStorage.readByKey(attachment.storageKey);
     reply.header("content-type", stored.mimeType ?? attachment.mimeType);
+    const asciiName = attachment.originalName.replace(/[^\x20-\x7E]/g, "_").replace(/"/g, "_");
+    const utf8Name = encodeURIComponent(attachment.originalName);
     reply.header(
       "content-disposition",
-      `attachment; filename="${attachment.originalName.replace(/"/g, "_")}"`
+      `attachment; filename="${asciiName}"; filename*=UTF-8''${utf8Name}`
     );
     if (stored.sizeBytes) {
       reply.header("content-length", String(stored.sizeBytes));
@@ -1101,6 +1219,15 @@ export async function createBridgeApp(
   app.post("/auth/oidc/login", async (request, reply) => {
     if (authMode !== "oidc") {
       return reply.code(404).send({ message: "oidc auth flow disabled" });
+    }
+
+    if (oidcProxySecret.length > 0) {
+      const providedSecret = request.headers[oidcProxySecretHeader];
+      const secretValue = Array.isArray(providedSecret) ? providedSecret[0] : providedSecret;
+      if (secretValue !== oidcProxySecret) {
+        incrementCounter(counters, "auth.oidc.invalid_proxy_secret");
+        return reply.code(403).send({ message: "invalid proxy secret" });
+      }
     }
 
     const clientAddress = getClientAddress(request, trustProxyHeaders);
@@ -1191,6 +1318,55 @@ export async function createBridgeApp(
       return reply.code(401).send({ message: "unauthorized" });
     }
     return { user };
+  });
+
+  app.post("/auth/change-password", async (request, reply) => {
+    if (authMode !== "local") {
+      return reply.code(405).send({ message: "password change disabled in oidc mode" });
+    }
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const changePasswordSchema = z.object({
+      currentPassword: z.string().min(1).max(256),
+      newPassword: passwordSchema
+    });
+    const parsed = changePasswordSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid payload: new password must be at least 10 characters with uppercase, lowercase, digit, and special character" });
+    }
+
+    const ok = await verifyPassword(auth.actorId, parsed.data.currentPassword);
+    if (!ok) {
+      incrementCounter(counters, "auth.change_password.invalid_current");
+      return reply.code(401).send({ message: "current password is incorrect" });
+    }
+
+    await setPassword(auth.actorId, parsed.data.newPassword);
+    const { sessionId, expiresAt } = await createSession(auth.actorId);
+    reply.setCookie(
+      "bridge_session",
+      sessionId,
+      sessionCookieConfig(sessionCookieSecure, sessionCookieSameSite, sessionCookieDomain, expiresAt)
+    );
+
+    broadcast(
+      appendAuditLog({
+        action: "auth.password_changed",
+        actorId: auth.actorId,
+        targetType: "user",
+        targetId: auth.actorId,
+        summary: "User changed their password"
+      })
+    );
+
+    return { ok: true };
   });
 
   app.get("/search/messages", async (request, reply) => {
@@ -1389,6 +1565,110 @@ export async function createBridgeApp(
     };
   });
 
+  app.post("/read-state", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const parsed = readStateSyncSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid read state payload" });
+    }
+
+    setReadState(auth.actorId, parsed.data.channelId, parsed.data.lastMessageId);
+
+    if (parsed.data.markNotificationsReadUpToMessage !== false) {
+      markNotificationsReadUpToMessage(auth.actorId, parsed.data.channelId, parsed.data.lastMessageId);
+    }
+
+    const notificationsResult = getNotificationsForUser(auth.actorId);
+    const unreadCounts = getUnreadNotificationCountsForUser(auth.actorId);
+    const totalUnread = unreadCounts.reduce((acc, item) => acc + item.unreadCount, 0);
+
+    return {
+      ok: true,
+      readState: {
+        channelId: parsed.data.channelId,
+        lastMessageId: parsed.data.lastMessageId
+      },
+      notificationUnreadCount: notificationsResult.unreadCount,
+      workspaceUnread: {
+        totalUnread,
+        channels: unreadCounts
+      },
+      notifications: notificationsResult.notifications.map(serializeNotification)
+    };
+  });
+
+  app.put("/me/push-devices/:installationId", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+
+    const { installationId: rawInstallationId } = request.params as { installationId?: string };
+    const installationId = (rawInstallationId ?? "").toString().trim();
+    if (installationId.length === 0) {
+      return reply.code(400).send({ message: "installationId is required" });
+    }
+    const parsed = pushDeviceSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ message: "invalid push device payload" });
+    }
+
+    const device = registerPushDevice(auth.actorId, installationId, {
+      provider: parsed.data.provider,
+      platform: parsed.data.platform,
+      deviceToken: parsed.data.pushToken,
+      appVersion: parsed.data.appVersion,
+      deviceName: parsed.data.deviceName,
+      osVersion: parsed.data.osVersion,
+      timezone: parsed.data.timezone,
+      locale: parsed.data.locale,
+      metadata: parsed.data.metadata
+    });
+    return { ok: true, device };
+  });
+
+  app.delete("/me/push-devices/:installationId", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+    const { installationId: rawInstallationId } = request.params as { installationId?: string };
+    const installationId = (rawInstallationId ?? "").toString().trim();
+    if (installationId.length === 0) {
+      return reply.code(400).send({ message: "installationId is required" });
+    }
+    const removed = unregisterPushDevice(auth.actorId, installationId);
+    return { ok: true, removed };
+  });
+
+  app.get("/me/push-devices", async (request, reply) => {
+    const auth = await requireAuthenticated(request);
+    if (!auth.ok) {
+      return reply.code(401).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+    return { devices: getPushDevicesForUser(auth.actorId) };
+  });
+
   app.get("/notifications/preferences", async (request, reply) => {
     const auth = await requireAuthenticated(request);
     if (!auth.ok) {
@@ -1427,6 +1707,34 @@ export async function createBridgeApp(
     const preferences = updateNotificationPreferences(auth.actorId, parsed.data);
     return {
       preferences
+    };
+  });
+
+  app.get("/admin/notifications/delivery", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+    return pushDelivery.getStatus();
+  });
+
+  app.post("/admin/notifications/delivery/run", async (request, reply) => {
+    const auth = await requireAdmin(request);
+    if (!auth.ok) {
+      return reply.code(403).send({ message: auth.reason });
+    }
+    const limited = enforceApiRateLimit(request, reply, auth.actorId);
+    if (limited) {
+      return limited;
+    }
+    const result = await pushDelivery.runOnce();
+    return {
+      result,
+      status: pushDelivery.getStatus()
     };
   });
 
@@ -1753,7 +2061,8 @@ export async function createBridgeApp(
     if (userEvent.type !== "user:updated") {
       return reply.code(500).send({ message: "unexpected user event type" });
     }
-    await setPassword(userEvent.payload.id, "welcome123");
+    const initialPassword = randomBytes(18).toString("base64url");
+    await setPassword(userEvent.payload.id, initialPassword);
 
     const auditEvent = appendAuditLog({
       action: "user.invited",
@@ -1766,7 +2075,7 @@ export async function createBridgeApp(
     broadcast(userEvent);
     broadcast(auditEvent);
 
-    return reply.code(201).send({ user: userEvent.payload });
+    return reply.code(201).send({ user: userEvent.payload, initialPassword });
   });
 
   app.post("/admin/bots", async (request, reply) => {
@@ -2160,6 +2469,11 @@ export async function createBridgeApp(
 
       sockets.add(socket);
       socketActorId.set(socket, actorId);
+      const wsMessageLimiter = createFixedWindowRateLimiter(
+        envNumber("WS_MESSAGE_RATE_LIMIT_MAX", 60),
+        envNumber("WS_MESSAGE_RATE_LIMIT_WINDOW_MS", 10_000)
+      );
+      const wsLimiterKey = actorId;
 
       socket.send(
         JSON.stringify({
@@ -2177,6 +2491,18 @@ export async function createBridgeApp(
 
       socket.on("message", (buffer) => {
         try {
+          const wsRateDecision = wsMessageLimiter.consume(wsLimiterKey);
+          if (!wsRateDecision.allowed) {
+            socket.send(
+              JSON.stringify({
+                type: "error",
+                payload: { message: `websocket rate limit exceeded, retry after ${wsRateDecision.retryAfterSeconds}s` }
+              } satisfies ServerEvent)
+            );
+            incrementCounter(counters, "security.ws_rate_limit.blocked");
+            return;
+          }
+
           const candidate = JSON.parse(buffer.toString("utf8")) as unknown;
           const parsed = clientEventSchema.safeParse(candidate);
           if (!parsed.success) {
