@@ -9,6 +9,8 @@ services:
 
   bridge-server:
     restart: always
+    env_file:
+      - .env.production
     ports: !reset []
     expose:
       - "4000"

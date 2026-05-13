@@ -37,7 +37,17 @@ Build the web application with:
 npm run build -w @bridge/web
 ```
 
-This produces a static site in `apps/web/dist`. The repository does not provide a production web server for this output. Serve it with your standard static hosting layer or reverse proxy.
+This produces a static site in `apps/web/dist`. You can serve that directory from any static hosting layer, or build the included nginx image with `apps/web/Dockerfile`.
+
+When building the web image, set the browser-facing API and WebSocket URLs at build time:
+
+```bash
+docker build \
+  -f apps/web/Dockerfile \
+  --build-arg VITE_API_URL=https://bridge.example.com/api \
+  --build-arg VITE_WS_URL=wss://bridge.example.com \
+  -t bridge-web .
+```
 
 ### Desktop
 
@@ -59,6 +69,20 @@ npm run build -w @bridge/desktop
 5. Build and deploy the server artifact.
 6. Build and publish the web static artifact.
 7. Confirm `/health`, `/ready`, and a full login flow before opening traffic broadly.
+
+## Compose Deployment
+
+The repository includes `docker-compose.yml` for local validation and `docker-compose.prod.yml` as a production override that removes host port exposure from Postgres, Redis, the API, and the web container. In production, put a TLS-terminating reverse proxy in front of `bridge-web` and `bridge-server`.
+
+Example:
+
+```bash
+cp .env.production.example .env.production
+docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+docker compose exec bridge-server npm run db:migrate -w @bridge/server
+```
+
+Before using this outside a trusted environment, replace every generated or example secret in `.env.production`, set the public `VITE_API_URL` and `VITE_WS_URL`, and configure your reverse proxy to route HTTP traffic to `bridge-web:80` and WebSocket/API traffic to `bridge-server:4000`.
 
 ## Reverse Proxy Requirements
 
