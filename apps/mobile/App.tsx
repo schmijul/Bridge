@@ -1,5 +1,5 @@
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -14,7 +14,7 @@ import {
   View
 } from "react-native";
 
-import type { Channel, Message, User } from "@bridge/shared";
+import type { Channel, ClientEvent, Message, ServerEvent, User } from "@bridge/shared";
 import {
   fetchBootstrap,
   fetchNotifications,
@@ -227,11 +227,13 @@ export default function App() {
   const [notificationError, setNotificationError] = useState<string | null>(null);
   const [signedInName, setSignedInName] = useState<string | null>(null);
   const [statusText, setStatusText] = useState(`Connecting to ${config.apiUrl}...`);
+  const [realtimeText, setRealtimeText] = useState(`Realtime: connecting to ${config.wsUrl}`);
   const [sessionMessage, setSessionMessage] = useState<string | null>(null);
   const [loginEmail, setLoginEmail] = useState("alex@bridge.local");
   const [loginPassword, setLoginPassword] = useState("bridge123!");
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
 
   const usersById = useMemo(() => {
     return new Map((bootstrap?.users ?? []).map((user) => [user.id, user]));
@@ -263,14 +265,122 @@ export default function App() {
   const notificationUnreadCount = notificationFeed?.unreadCount ?? 0;
   const notificationItems = notificationFeed?.items ?? [];
   function handleSessionExpired(message: string): void {
+    socketRef.current?.close();
+    socketRef.current = null;
     setBootstrap(null);
     setWorkspaceUnread(null);
     setNotificationFeed(null);
     setSelectedChannelId(null);
     setActiveSection("chat");
     setStatusText("Sign in to load your workspace.");
+    setRealtimeText(`Realtime: disconnected from ${config.wsUrl}`);
     setSessionMessage(message);
     setNotificationError(null);
+  }
+
+  function applyRealtimeEvent(event: ServerEvent): void {
+    if (event.type === "sync:snapshot") {
+      setBootstrap(event.payload);
+      setWorkspaceUnread(null);
+      void loadNotificationInbox();
+      return;
+    }
+
+    if (event.type === "message:new") {
+      setBootstrap((current) => {
+        if (!current || current.messages.some((message) => message.id === event.payload.id)) {
+          return current;
+        }
+        return { ...current, messages: [...current.messages, event.payload] };
+      });
+      void loadNotificationInbox();
+      return;
+    }
+
+    if (event.type === "message:deleted") {
+      setBootstrap((current) => {
+        if (!current) {
+          return current;
+        }
+        return {
+          ...current,
+          messages: current.messages.filter((message) => message.id !== event.payload.messageId)
+        };
+      });
+      void loadNotificationInbox();
+      return;
+    }
+
+    if (event.type === "channel:created") {
+      setBootstrap((current) => {
+        if (!current || current.channels.some((channel) => channel.id === event.payload.id)) {
+          return current;
+        }
+        return { ...current, channels: [...current.channels, event.payload] };
+      });
+      return;
+    }
+
+    if (event.type === "channel:updated") {
+      setBootstrap((current) => {
+        if (!current) {
+          return current;
+        }
+        return {
+          ...current,
+          channels: current.channels.map((channel) =>
+            channel.id === event.payload.id ? event.payload : channel
+          )
+        };
+      });
+      return;
+    }
+
+    if (event.type === "user:updated") {
+      setBootstrap((current) => {
+        if (!current) {
+          return current;
+        }
+        const exists = current.users.some((user) => user.id === event.payload.id);
+        return {
+          ...current,
+          users: exists
+            ? current.users.map((user) => (user.id === event.payload.id ? event.payload : user))
+            : [...current.users, event.payload]
+        };
+      });
+      return;
+    }
+
+    if (event.type === "workspace:updated") {
+      setBootstrap((current) => (current ? { ...current, workspace: event.payload } : current));
+      return;
+    }
+
+    if (event.type === "presence:changed") {
+      setBootstrap((current) => {
+        if (!current) {
+          return current;
+        }
+        const onlineUserIds = new Set(current.onlineUserIds);
+        if (event.payload.state === "online") {
+          onlineUserIds.add(event.payload.userId);
+        } else {
+          onlineUserIds.delete(event.payload.userId);
+        }
+        return { ...current, onlineUserIds: [...onlineUserIds] };
+      });
+      return;
+    }
+
+    if (event.type === "read:changed") {
+      void loadNotificationInbox();
+      return;
+    }
+
+    if (event.type === "error") {
+      setSessionMessage(event.payload.message);
+    }
   }
 
   async function loadNotificationInbox(): Promise<void> {
@@ -336,6 +446,62 @@ export default function App() {
     void loadWorkspace({ keepSelection: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!bootstrap) {
+      return;
+    }
+
+    const socket = new WebSocket(config.wsUrl);
+    socketRef.current = socket;
+    setRealtimeText(`Realtime: connecting to ${config.wsUrl}`);
+
+    socket.onopen = () => {
+      setRealtimeText("Realtime: live");
+      socket.send(
+        JSON.stringify({
+          type: "presence:update",
+          payload: { state: "online" }
+        } satisfies ClientEvent)
+      );
+    };
+
+    socket.onmessage = (event) => {
+      try {
+        applyRealtimeEvent(JSON.parse(event.data as string) as ServerEvent);
+      } catch {
+        setSessionMessage("Received an invalid realtime event.");
+      }
+    };
+
+    socket.onerror = () => {
+      setRealtimeText("Realtime: connection error");
+    };
+
+    socket.onclose = () => {
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
+      setRealtimeText(`Realtime: disconnected from ${config.wsUrl}`);
+    };
+
+    return () => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(
+          JSON.stringify({
+            type: "presence:update",
+            payload: { state: "offline" }
+          } satisfies ClientEvent)
+        );
+      }
+      socket.close();
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
+    };
+    // Reconnect only when the user moves between signed-out and signed-in state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bootstrap !== null]);
 
   async function handleLogin(): Promise<void> {
     setLoginBusy(true);
@@ -515,9 +681,7 @@ export default function App() {
             <Text style={styles.statLabel}>Notifications</Text>
           </View>
         </View>
-        <Text style={styles.realtimeHint}>
-          Realtime socket reserved for the next shell iteration: {config.wsUrl}
-        </Text>
+        <Text style={styles.realtimeHint}>{realtimeText}</Text>
       </View>
 
       <View style={styles.tabRow}>
